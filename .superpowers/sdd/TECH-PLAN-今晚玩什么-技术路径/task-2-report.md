@@ -48,3 +48,6 @@ Restored derive_review_summary with normalized Steam global/schinese mappings. B
 
 ## Final Steam/probe fix wave
 Corrected probe endpoint paths, restored a clean importable Steam client with env host/cache support and review query parameters. Full unittest: 11 passed, 1 skipped.
+
+## Final correctness wave
+Corrected demo/horror candidate flags, distinct negative-review avoid counting, and Steam request headers/throttling. Full unittest: 11 passed, 1 skipped.
