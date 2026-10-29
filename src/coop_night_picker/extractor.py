@@ -56,3 +56,17 @@ def build_avoid_reasons(reviews):
         for d in ds:
             if d in {"network","dealbreaker"}: c[d]+=1
     return [f"{k}({v}条提及)" for k,v in c.items()]
+
+def derive_review_summary(props):
+    if isinstance(props,list): props=props[0] if props else {}
+    if not isinstance(props,dict): return {}
+    so=props.get('summary_options',{}) or {}
+    def norm(x):
+        if not isinstance(x,dict): return {}
+        total=x.get('nReviews',x.get('total_reviews',x.get('cReviews',0))); pos=x.get('nReviewsPositive',x.get('nRecommended',x.get('positive_reviews',0))); pct=x.get('fRating',x.get('positive_pct'))
+        if pct is None and total: pct=100*pos/total
+        return {'total':total,'positive':pos,'pct':pct or 0,'score':x.get('eReviewScore',x.get('review_score'))}
+    out={'global':norm(so.get('summaryGlobalNoOutliers') or so.get('summaryDisplayed') or props.get('summaryGlobalNoOutliers')),'schinese':norm(so.get('summaryYourLanguage'))}
+    for x in (props.get('filter_options',{}) or {}).get('rgLanguageOutliers',[]):
+        if str(x.get('strLanguage','')).lower() in {'schinese','chinese'}: out['schinese']=norm(x)
+    return out
