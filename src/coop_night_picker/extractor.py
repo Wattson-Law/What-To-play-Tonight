@@ -50,20 +50,9 @@ def extract_quotes(raw_review,voted_up=True,max_quotes=3,appid=None):
   assert s in text; out.append({'quote_text':s,'dimensions_json':ds,'voted_up':int(voted_up),'votes_helpful':votes,'recommendation_id':rid,'playtime_hours':round((raw_review.get('author') or {}).get('playtime_at_review',0)/60,2) if isinstance(raw_review,dict) else 0.0,'review_url':url or 'https://steamcommunity.com/'})
  return out
 def build_avoid_reasons(reviews):
- c=Counter();\n    for r in reviews:\n        ds={d for q in extract_quotes(r,False,99) for d in q['dimensions_json']}\n        for d in ds:\n            if d in {'network','dealbreaker'}: c[d]+=1\n    return [f'{k}({v}条提及)' for k,v in c.items()]
-def derive_review_summary(props):
-    if isinstance(props,list): props=props[0] if props else {}
-    if not isinstance(props,dict): return {}
-    so=props.get('summary_options',{}) or {}; out={}
-    def norm(x):
-        if not isinstance(x,dict): return {}
-        total=x.get('nReviews',x.get('total_reviews',x.get('cReviews',0))); pos=x.get('nReviewsPositive',x.get('nRecommended',x.get('positive_reviews',x.get('cRecommended',0)))); pct=x.get('fRating',x.get('positive_pct',x.get('percent_positive'))); pct=(100*pos/total if pct is None and total else pct); return {'total':total,'positive':pos,'pct':pct or 0,'score':x.get('eReviewScore',x.get('review_score'))}
-    out['global']=norm(so.get('summaryGlobalNoOutliers') or so.get('summaryDisplayed') or props.get('summaryGlobalNoOutliers') or props.get('query_summary',{}))
-    out['schinese']=norm(so.get('summaryYourLanguage'))
-    for x in (props.get('filter_options',{}) or {}).get('rgLanguageOutliers',[]) or []:
-        if str(x.get('strLanguage','')).lower() in {'schinese','chinese'}: out['schinese']=norm(x)
-    return out
-
-
-
-
+    c=Counter()
+    for r in reviews:
+        ds={d for q in extract_quotes(r,False,99) for d in q["dimensions_json"]}
+        for d in ds:
+            if d in {"network","dealbreaker"}: c[d]+=1
+    return [f"{k}({v}条提及)" for k,v in c.items()]
