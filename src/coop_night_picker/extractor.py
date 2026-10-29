@@ -57,10 +57,11 @@ def derive_review_summary(props):
     so=props.get('summary_options',{}) or {}; out={}
     def norm(x):
         if not isinstance(x,dict): return {}
-        return {'total':x.get('nReviews',x.get('total_reviews',x.get('cReviews',0))), 'positive':x.get('nRecommended',x.get('positive_reviews',x.get('cRecommended',0))), 'pct':x.get('fRating',x.get('positive_pct',x.get('percent_positive',0))), 'score':x.get('eReviewScore',x.get('review_score'))}
+        total=x.get('nReviews',x.get('total_reviews',x.get('cReviews',0))); pos=x.get('nReviewsPositive',x.get('nRecommended',x.get('positive_reviews',x.get('cRecommended',0)))); pct=x.get('fRating',x.get('positive_pct',x.get('percent_positive'))); pct=(100*pos/total if pct is None and total else pct); return {'total':total,'positive':pos,'pct':pct or 0,'score':x.get('eReviewScore',x.get('review_score'))}
     out['global']=norm(so.get('summaryGlobalNoOutliers') or so.get('summaryDisplayed') or props.get('summaryGlobalNoOutliers') or props.get('query_summary',{}))
     out['schinese']=norm(so.get('summaryYourLanguage'))
     for x in (props.get('filter_options',{}) or {}).get('rgLanguageOutliers',[]) or []:
         if str(x.get('strLanguage','')).lower() in {'schinese','chinese'}: out['schinese']=norm(x)
     return out
+
 

@@ -31,7 +31,7 @@ def main(argv=None):
    return None
   d=parse_appdetails(json.loads(fixture('appdetails')),aid) if fixture('appdetails') else (parse_appdetails(client.appdetails(aid),aid) if not root else {}) ; g.update(d)
   page=parse_store_page(fixture('store') or fixture('store_page') or (client.store_page(aid) if not root else '')); tags=page['tags']; ids={x['id'] for x in tags}; g['tags_json']=[x['name'] for x in tags]; g['horror_level']='scary' if ({1667,3978} & ids) else ('mild' if 1721 in ids else 'none'); cats=set(g.get('categories_json') or []); g['online_coop']=int(38 in ids or 3843 in ids or '在线合作' in cats); g['local_coop']=int(39 in ids or 3841 in ids or '同屏/分屏合作' in cats); g['remote_play']=int(44 in ids or '远程同乐' in cats)
-  sm=derive_review_summary(page['review_props']); glob=sm.get('global',{}); sch=sm.get('schinese',{}); g['total_reviews']=glob.get('nReviews',glob.get('total_reviews',g.get('total_reviews',0))); g['positive_pct']=glob.get('fRating',glob.get('positive_pct',g.get('positive_pct',0))); g['schinese_total']=sch.get('nReviews',sch.get('total_reviews')); g['schinese_pct']=sch.get('fRating',sch.get('positive_pct')); g['review_score']=g.get('review_score',0); g['review_tier_zh']=REVIEW_TIERS.get(g['review_score'],REVIEW_TIERS[0])['zh']
+  sm=derive_review_summary(page['review_props']); glob=sm.get('global',{}); sch=sm.get('schinese',{}); g['total_reviews']=glob.get('nReviews',glob.get('total_reviews',g.get('total_reviews',0))); g['positive_pct']=glob.get('fRating',glob.get('positive_pct',g.get('positive_pct',0))); g['schinese_total']=sch.get('nReviews',sch.get('total_reviews')); g['schinese_pct']=sch.get('fRating',sch.get('positive_pct')); g['review_score']=glob.get('score') or g.get('review_score',0); g['schinese_score']=sch.get('score'); g['review_tier_zh']=REVIEW_TIERS.get(g['review_score'],REVIEW_TIERS[0])['zh']
   reviews=[]
   if a.with_reviews:
    raw=fixture('reviews'); rv=parse_appreviews(json.loads(raw)) if raw else parse_appreviews(client.appreviews(aid)); reviews=rv['reviews']
@@ -45,6 +45,7 @@ def main(argv=None):
        q['appid']=aid; insert_quote(c,q)
  print(f'processed {min(a.limit,len(merged))} games; db={a.db}; dry_run={a.dry_run}'); return 0
 if __name__=='__main__': raise SystemExit(main())
+
 
 
 
