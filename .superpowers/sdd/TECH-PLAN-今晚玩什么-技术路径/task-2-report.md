@@ -42,3 +42,6 @@ verify_snapshot now checks each quote against optional <appid>.json review fixtu
 
 ## Final fixture/avoid fix
 Offline keyed appdetails mappings now produce candidates and companion metadata is used; avoid network/dealbreaker counts are per distinct negative review. Full unittest passes.
+
+## Summary extractor regression fix
+Restored derive_review_summary with normalized Steam global/schinese mappings. Build module import, help, and full unittest pass.
