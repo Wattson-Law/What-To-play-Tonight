@@ -29,7 +29,8 @@ else:
     mcp = None
 
 
-def _load_log(path: Path = USER_LOG_PATH) -> dict:
+def _load_log(path: Path | None = None) -> dict:
+    path = Path(path) if path is not None else USER_LOG_PATH
     try:
         value = json.loads(path.read_text(encoding="utf-8"))
         return value if isinstance(value, dict) else {"records": []}
@@ -48,7 +49,8 @@ def _excluded(log: dict) -> set[int]:
     return {int(r["appid"]) for r in _records(log) if r.get("status") in {"played", "avoided"} and str(r.get("appid", "")).isdigit()}
 
 
-def _save_log(log: dict, path: Path = USER_LOG_PATH) -> None:
+def _save_log(log: dict, path: Path | None = None) -> None:
+    path = Path(path) if path is not None else USER_LOG_PATH
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, name = tempfile.mkstemp(prefix=".user_log.", suffix=".tmp", dir=path.parent)
     try:
@@ -72,14 +74,16 @@ def _open_snapshot():
         return None
 
 
-def _question_list(horror, budget, players):
+def _question_list(horror, budget, players, session_duration=None):
     questions = []
     if horror is None:
         questions.append({"param": "horror", "question": "恐怖游戏能接受吗？", "options": ["一点都不行 (none)", "微恐/心理恐怖可以 (mild)", "越吓人越好 (scary)", "都行 (any)"]})
     if budget is None:
-        questions.append({"param": "budget", "question": "想白嫖免费游戏/试玩 Demo，还是愿意花钱买？", "options": ["只看免费或有免费Demo的 (free_or_demo)", "50元以内便宜好玩的 (under_50)", "价格无所谓，好玩就行 (any_paid)", "都行 (any)"]})
+        questions.append({"param": "budget", "question": "想白嫖免费游戏/试玩 Demo，还是愿意花钱买？", "options": ["只看免费或有免费Demo的 (free_or_demo)", "50元以内便宜好玩的 (under_50)", "价格无所谓，好玩就行 (any)"]})
     if players is None:
         questions.append({"param": "players", "question": "今晚大概几个人一起玩？（比如 2 人、4 人）", "options": ["2人", "3-4人", "5人以上"]})
+    if session_duration is None:
+        questions.append({"param": "session_duration", "question": "今晚准备玩多久？", "options": ["短局（30-60分钟）", "一两个小时", "不限时"]})
     return questions
 
 
@@ -92,7 +96,7 @@ def _filtered(conn, horror, budget, players, mode, excluded):
 def _format_game(game, conn):
     score = int(game.get("review_score") or 0)
     tier = REVIEW_TIERS.get(score, REVIEW_TIERS[0])
-    return {
+    formatted = {
         "appid": int(game["appid"]), "name": game.get("name", ""), "type": game.get("type", "game"),
         "review_score": score, "review_tier": tier["zh"], "stars": tier["stars"],
         "positive_pct": game.get("positive_pct", 0), "schinese_pct": game.get("schinese_pct"),
@@ -102,10 +106,16 @@ def _format_game(game, conn):
         "online_coop": bool(game.get("online_coop")), "local_coop": bool(game.get("local_coop")),
         "short_desc": game.get("short_desc") or "", "avoid_reasons": game.get("avoid_reasons_json") or [],
     }
+    try:
+        qs = conn.execute("SELECT * FROM game_quotes WHERE appid=? AND voted_up=1 ORDER BY votes_helpful DESC LIMIT 1", (game["appid"],)).fetchall()
+        formatted["quotes"] = [db._decode(q) for q in qs]
+    except Exception:
+        formatted["quotes"] = []
+    return formatted
 
 
-def _markdown(groups, avoid, players, horror, budget):
-    title = f"### 🎮 今晚玩什么 · 筛选结果（{players}人｜{horror}｜{budget}）"
+def _markdown(groups, avoid, players, horror, budget, mode="online"):
+    title = f"### 🎮 今晚玩什么 · 筛选结果（{players}人｜{horror}｜{budget}｜{mode}）"
     lines = [title, ""]
     for score, games in groups.items():
         tier = REVIEW_TIERS[int(score)]
@@ -114,18 +124,21 @@ def _markdown(groups, avoid, players, horror, budget):
             price = "免费" if g["is_free"] else f"¥{float(g['price_cny'] or 0):g}"
             lines.append(f"{i}. **《{g['name']}》** — {price} | 支持 {g.get('max_players') or '?'} 人在线合作")
             lines.append(f"   - 📊 **口碑**：全语言 {g.get('positive_pct', 0)}%（{tier['zh']}，{g.get('total_reviews', 0)}篇）｜简中 {g.get('schinese_pct') if g.get('schinese_pct') is not None else '—'}%")
+            quotes = g.get("quotes", [])
+            for q in quotes[:1]:
+                lines.append(f"   - 💡 **推荐理由**：> {q.get('quote_text', '')}（[查看原评]({q.get('review_url', '')})）")
         lines.append("")
     lines += ["---", "#### ⚠️ 避雷榜（同筛选条件下容易踩坑的游戏）"]
     lines += [f"- ❌ **《{g['name']}》** — {g.get('avoid_reasons') or REVIEW_TIERS.get(int(g.get('review_score') or 0), REVIEW_TIERS[0])['zh']}" for g in avoid] or ["- 暂无"]
     return "\n".join(lines)
 
 
-def recommend_coop_games(horror: Optional[Literal["none", "mild", "scary", "any"]] = None, budget: Optional[Literal["free_or_demo", "under_50", "any_paid", "any"]] = None, players: Optional[int] = None, mode: Literal["online", "local", "any"] = "online", confirmed: bool = False, limit_per_tier: int = 3) -> dict:
-    questions = _question_list(horror, budget, players)
+def recommend_coop_games(horror: Optional[Literal["none", "mild", "scary", "any"]] = None, budget: Optional[Literal["free_or_demo", "under_50", "any_paid", "any"]] = None, players: Optional[int] = None, mode: Literal["online", "local", "any"] = "online", confirmed: bool = False, limit_per_tier: int = 3, session_duration: Optional[str] = None) -> dict:
+    questions = _question_list(horror, budget, players, session_duration)
     if not confirmed and questions:
         return {"status": "need_more_info", "instruction_for_assistant": "请在一轮回复内问完这些问题；收到答案后传入具体参数并设置 confirmed=True。", "questions": questions}
     if horror is None or budget is None or players is None:
-        return {"status": "need_more_info", "instruction_for_assistant": "请补齐筛选参数并设置 confirmed=True。", "questions": _question_list(horror, budget, players)}
+        return {"status": "need_more_info", "instruction_for_assistant": "请补齐筛选参数并设置 confirmed=True。", "questions": _question_list(horror, budget, players, session_duration)}
     conn = _open_snapshot()
     if conn is None:
         return {"status": "empty_snapshot", "message": "本地游戏快照不存在或无法读取，请先生成 data/games.sqlite。", "groups": {}, "avoid_list": [], "markdown_preview": ""}
@@ -140,8 +153,9 @@ def recommend_coop_games(horror: Optional[Literal["none", "mild", "scary", "any"
             groups.setdefault(score, []).append(_format_game(game, conn))
         groups = {str(k): v[:max(1, int(limit_per_tier))] for k, v in sorted(groups.items(), reverse=True)}
         ids = {g["appid"] for values in groups.values() for g in values}
-        avoid = [_format_game(g, conn) for g in db.get_avoid_list(conn, 3) if int(g["appid"]) not in excluded and int(g["appid"]) not in ids]
-        return {"status": "ok", "groups": groups, "avoid_list": avoid, "meta": {"excluded_appids": sorted(excluded), "count": sum(map(len, groups.values()))}, "markdown_preview": _markdown(groups, avoid, players, horror, budget)}
+        avoid = [_format_game(g, conn) for g in db.get_avoid_list(conn, 20) if int(g["appid"]) not in excluded and int(g["appid"]) not in ids and (horror in {"any", g.get("horror_level", "none")}) and (not players or g.get("max_players") is None or int(g.get("max_players")) >= players) and (mode == "any" or (mode == "online" and g.get("online_coop")) or (mode == "local" and g.get("local_coop")))]
+        avoid = [g for g in avoid if budget == "any" or (budget == "free_or_demo" and (g["is_free"] or g["has_demo"])) or (budget == "under_50" and float(g.get("price_cny") or 0) < 50) or (budget == "any_paid" and not g["is_free"])][:3]
+        return {"status": "ok", "groups": groups, "avoid_list": avoid, "meta": {"excluded_appids": sorted(excluded), "count": sum(map(len, groups.values()))}, "markdown_preview": _markdown(groups, avoid, players, horror, budget, mode)}
     finally:
         conn.close()
 
@@ -153,7 +167,8 @@ def get_game_card(appid: int, include_quotes: int = 3) -> dict:
         game = db.get_game(conn, appid)
         if game is None: return {"status": "not_found", "appid": appid}
         card = _format_game(game, conn)
-        rows = conn.execute("SELECT * FROM game_quotes WHERE appid=? ORDER BY voted_up DESC, votes_helpful DESC LIMIT ?", (appid, max(1, include_quotes) * 2)).fetchall()
+        rows = conn.execute("SELECT * FROM game_quotes WHERE appid=? AND voted_up=1 ORDER BY votes_helpful DESC LIMIT ?", (appid, max(1, include_quotes))).fetchall()
+        rows += conn.execute("SELECT * FROM game_quotes WHERE appid=? AND voted_up=0 ORDER BY votes_helpful DESC LIMIT ?", (appid, max(1, include_quotes))).fetchall()
         card["quotes"] = [db._decode(r) for r in rows]
         card["positive_quotes"] = [q for q in card["quotes"] if q.get("voted_up")][:include_quotes]
         card["negative_quotes"] = [q for q in card["quotes"] if not q.get("voted_up")][:include_quotes]
@@ -186,11 +201,11 @@ def log_play(appid: int, status: Literal["played", "avoided", "wishlist"], note:
     log = _load_log(); records = _records(log)
     records.append({"appid": int(appid), "status": status, "note": note})
     log["records"] = records; _save_log(log)
-    return {"status": "saved", "appid": int(appid), "saved_status": status, "excluded": status in {"played", "avoided"}}
+    return {"status": "saved", "appid": int(appid), "saved_status": status, "excluded": status in {"played", "avoided"}, "excluded_appid": int(appid) if status in {"played", "avoided"} else None}
 
 
 def tonight_playbook() -> str:
-    return "请最多用一轮回复询问人数、恐怖接受度、预算（免费/Demo或付费）和游玩模式；随后调用 recommend_coop_games 并设置 confirmed=True，展示按评价分组的游戏、星级、理由和避雷榜。"
+    return "请最多用一轮回复询问四个问题：人数、恐怖接受度、预算（免费/Demo、50元以内或不限）和游玩时长；随后调用 recommend_coop_games 并设置 confirmed=True，展示按评价分组的游戏、星级、理由和避雷榜。"
 
 
 if mcp is not None:

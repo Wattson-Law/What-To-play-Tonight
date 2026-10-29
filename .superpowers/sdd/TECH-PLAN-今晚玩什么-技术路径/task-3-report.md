@@ -14,3 +14,14 @@
 ## 关注事项
 - `data/user_log.json` 和 SQLite 快照路径沿用 `.gitignore`；测试通过环境/模块路径覆盖使用临时文件。
 - `resolve_game` 仅在本地结果不足时调用 Steam；网络失败写入结构化 `meta.network`。
+
+## Fix Round 1
+
+- 修复日志路径默认参数在导入时绑定的问题，支持运行时覆盖路径。
+- `log_play` 返回 `excluded_appid`，并保持原子追加。
+- 证据卡按好评/差评分别查询，确保差评不会被好评挤出。
+- 避雷榜复用恐怖、预算、人数、模式筛选条件。
+- 首轮追问补充游玩时长，预算选项统一为 `free_or_demo`、`under_50`、`any`。
+- Markdown 增加推荐评测原句和原评 URL，并展示模式。
+
+验证：`pytest -q` → 9 passed。
