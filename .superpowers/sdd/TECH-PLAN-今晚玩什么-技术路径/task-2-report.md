@@ -24,3 +24,6 @@ Status: complete
 Implemented stable search parsing, correct tagdata endpoint, one-client snapshot enrichment for live/offline fixtures, review summary extraction, avoid criteria, bounded multi-review quote insertion with valid URLs, and stricter verification of required indexes and tier distributions.
 
 Tests: `PYTHONPATH=src python -m unittest discover -s tests -v` — 6 passed.
+
+## Fix round 3
+Status: complete. Repaired Steam client syntax, corrected tagdata endpoint, added real Steam review summary parsing, and preserved multi-review URL/cap behavior. Tests: import check, build_snapshot --help, and full unittest suite passed.

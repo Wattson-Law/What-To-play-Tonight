@@ -33,7 +33,7 @@ def parse_store_page(raw):
 def parse_appreviews(payload):
  if not isinstance(payload,dict): return {'reviews':[],'summary':{}}
  return {'reviews':payload.get('reviews',[]),'summary':payload.get('query_summary',{}),'metadata':{k:v for k,v in payload.items() if k not in {'reviews','query_summary'}}}
-def extract_quotes(raw_review,voted_up=True,max_quotes=3):
+def extract_quotes(raw_review,voted_up=True,max_quotes=3,appid=None):
  text=raw_review.get('review','') if isinstance(raw_review,dict) else str(raw_review); votes=int(raw_review.get('votes_up',0)) if isinstance(raw_review,dict) else 0; dims=[]
  scored=[]
  for s in re.split(r'[。！？!？\n]+',text):
@@ -42,7 +42,7 @@ def extract_quotes(raw_review,voted_up=True,max_quotes=3):
    ds=[k for k,p in REVIEW_KEYWORDS.items() if re.search(p,s,re.I)]
    if ds: scored.append((len(ds)*math.log(votes+2),s,ds))
  scored.sort(reverse=True)
- rid=raw_review.get('recommendationid','') if isinstance(raw_review,dict) else ''; author=(raw_review.get('author') or {}).get('steamid','') if isinstance(raw_review,dict) else ''; appid=raw_review.get('appid','') if isinstance(raw_review,dict) else ''
+ rid=raw_review.get('recommendationid','') if isinstance(raw_review,dict) else ''; author=(raw_review.get('author') or {}).get('steamid','') if isinstance(raw_review,dict) else ''; appid=appid or (raw_review.get('appid','') if isinstance(raw_review,dict) else '')
  url=raw_review.get('review_url') if isinstance(raw_review,dict) else None
  if not url and author and appid: url=f'https://steamcommunity.com/profiles/{author}/recommended/{appid}/'
  out=[]
@@ -63,3 +63,4 @@ def derive_review_summary(props):
     for x in (props.get('filter_options',{}) or {}).get('rgLanguageOutliers',[]) or []:
         if str(x.get('strLanguage','')).lower() in {'schinese','chinese'}: out['schinese']=norm(x)
     return out
+

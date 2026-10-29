@@ -40,9 +40,10 @@ def main(argv=None):
    upsert_game(c,g)
    for group,cap in ((pos,3),(neg,2)):
     for rr in group:
-     for q in extract_quotes(rr,bool(rr.get('voted_up')),cap):
+     for q in extract_quotes(rr,bool(rr.get('voted_up')),cap,appid=aid):
       if q.get('review_url','').startswith('https://steamcommunity.com/profiles/'):
        q['appid']=aid; insert_quote(c,q)
  print(f'processed {min(a.limit,len(merged))} games; db={a.db}; dry_run={a.dry_run}'); return 0
 if __name__=='__main__': raise SystemExit(main())
+
 
