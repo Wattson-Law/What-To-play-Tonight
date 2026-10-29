@@ -39,3 +39,6 @@ Added raw review fixture substring validation and aggregate per-game quote caps.
 
 ## Raw quote verification
 verify_snapshot now checks each quote against optional <appid>.json review fixtures, reporting appid and quote on mismatch while allowing absent files. Full unittest and verify help pass.
+
+## Final fixture/avoid fix
+Offline keyed appdetails mappings now produce candidates and companion metadata is used; avoid network/dealbreaker counts are per distinct negative review. Full unittest passes.
