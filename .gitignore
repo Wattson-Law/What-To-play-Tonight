@@ -6,3 +6,4 @@ data/user_log.json
 data/*.sqlite
 !data/games.sqlite
 .superpowers/sdd/
+src/coop_night_picker.egg-info/

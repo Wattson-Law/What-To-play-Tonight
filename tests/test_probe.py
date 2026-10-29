@@ -10,4 +10,10 @@ class ProbeHelpersTest(unittest.TestCase):
         self.assertEqual(classify_status(200), "ok")
         self.assertEqual(classify_status(500), "http_error")
 
+    def test_combination_failed_for_non_2xx(self):
+        from coop_night_picker.probe import combination_failed
+        self.assertFalse(combination_failed({"probes": [{"status": 200}]}))
+        self.assertTrue(combination_failed({"probes": [{"status": 302}]}))
+        self.assertTrue(combination_failed({"probes": [{"status": 500}]}))
+
 if __name__ == "__main__": unittest.main()

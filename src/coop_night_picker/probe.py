@@ -52,6 +52,10 @@ def probe_endpoint(client: httpx.Client, url: str) -> dict[str, Any]:
     return result
 
 
+def combination_failed(record: dict[str, Any]) -> bool:
+    return all(not (isinstance(item.get("status"), int) and 200 <= item["status"] < 300) for item in record["probes"])
+
+
 def run_combination(name: str, host: str, proxy: str | None) -> dict[str, Any]:
     transport = None
     results = []
@@ -83,7 +87,7 @@ def main(argv: list[str] | None = None) -> int:
     print(json.dumps(records, ensure_ascii=False, indent=2))
     if not args.as_json:
         print(format_table(records))
-    if args.strict and any(all(item.get("status") is None or item["classification"] == "error" for item in r["probes"]) for r in records):
+    if args.strict and any(combination_failed(r) for r in records):
         return 1
     return 0
 
