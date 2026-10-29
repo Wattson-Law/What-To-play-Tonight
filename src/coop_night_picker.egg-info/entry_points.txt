@@ -1,0 +1,2 @@
+[console_scripts]
+coop-night-picker-probe = coop_night_picker.probe:main
