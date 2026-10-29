@@ -18,6 +18,9 @@ def main(argv=None):
    elif fp.suffix.lower()=='.json':
     o=json.loads(fp.read_text(encoding='utf8')); aid=o.get('appid') or (int(fp.stem) if fp.stem.isdigit() else None)
     if aid: merged[int(aid)]=o
+    elif isinstance(o,dict):
+     for k,v in o.items():
+      if str(k).isdigit() and isinstance(v,dict) and ('data' in v or 'success' in v): merged[int(k)]={'appid':int(k),'appdetails':v}
  else:
   for q in ({'category1':998,'category3':38},{'category1':10,'category3':38},{'category1':998,'tags':3843},{'category1':998,'tags':1685},{'category1':998,'tags':1667},{'category1':998,'tags':1721},{'category1':998,'tags':3978}):
    for x in _items(client.store_search('',count=a.limit,**q)): merged[int(x['appid'])]=x
@@ -29,7 +32,7 @@ def main(argv=None):
     f=root/name
     if f.exists(): return f.read_text(encoding='utf8')
    return None
-  d=parse_appdetails(json.loads(fixture('appdetails')),aid) if fixture('appdetails') else (parse_appdetails(client.appdetails(aid),aid) if not root else {}) ; g.update(d)
+  d=parse_appdetails(json.loads(fixture('appdetails')),aid) if fixture('appdetails') else (parse_appdetails(seed.get('appdetails'),aid) if seed.get('appdetails') else (parse_appdetails(client.appdetails(aid),aid) if not root else {})) ; g.update(d)
   page=parse_store_page(fixture('store') or fixture('store_page') or (client.store_page(aid) if not root else '')); tags=page['tags']; ids={x['id'] for x in tags}; g['tags_json']=[x['name'] for x in tags]; g['horror_level']='scary' if ({1667,3978} & ids) else ('mild' if 1721 in ids else 'none'); cats=set(g.get('categories_json') or []); g['online_coop']=int(38 in ids or 3843 in ids or '在线合作' in cats); g['local_coop']=int(39 in ids or 3841 in ids or '同屏/分屏合作' in cats); g['remote_play']=int(44 in ids or '远程同乐' in cats)
   sm=derive_review_summary(page['review_props']); glob=sm.get('global',{}); sch=sm.get('schinese',{}); g['total_reviews']=glob.get('total',g.get('total_reviews',0)); g['positive_pct']=glob.get('pct',g.get('positive_pct',0)); g['schinese_total']=sch.get('total',sch.get('total_reviews')); g['schinese_pct']=sch.get('pct',sch.get('positive_pct')); g['review_score']=glob.get('score') or g.get('review_score',0); g['schinese_score']=sch.get('score'); g['review_tier_zh']=REVIEW_TIERS.get(g['review_score'],REVIEW_TIERS[0])['zh']
   reviews=[]
@@ -47,6 +50,10 @@ def main(argv=None):
       q['appid']=aid; insert_quote(c,q)
  print(f'processed {min(a.limit,len(merged))} games; db={a.db}; dry_run={a.dry_run}'); return 0
 if __name__=='__main__': raise SystemExit(main())
+
+
+
+
 
 
 
