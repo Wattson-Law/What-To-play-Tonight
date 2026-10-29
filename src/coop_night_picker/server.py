@@ -109,27 +109,38 @@ def _format_game(game, conn):
     try:
         qs = conn.execute("SELECT * FROM game_quotes WHERE appid=? AND voted_up=1 ORDER BY votes_helpful DESC LIMIT 1", (game["appid"],)).fetchall()
         formatted["quotes"] = [db._decode(q) for q in qs]
+        qs = conn.execute("SELECT * FROM game_quotes WHERE appid=? AND voted_up=0 ORDER BY votes_helpful DESC LIMIT 1", (game["appid"],)).fetchall()
+        formatted["negative_quotes"] = [db._decode(q) for q in qs]
     except Exception:
         formatted["quotes"] = []
     return formatted
 
 
 def _markdown(groups, avoid, players, horror, budget, mode="online"):
-    title = f"### 🎮 今晚玩什么 · 筛选结果（{players}人｜{horror}｜{budget}｜{mode}）"
+    mode_label = {"online": "online", "local": "local/co-op", "any": "online/local"}.get(mode, mode)
+    title = f"### 🎮 今晚玩什么 · 筛选结果（{players}人｜{horror}｜{budget}｜{mode_label}）"
     lines = [title, ""]
     for score, games in groups.items():
         tier = REVIEW_TIERS[int(score)]
         lines += [f"#### {tier['stars']} {tier['zh']}（Score {score}）"]
         for i, g in enumerate(games, 1):
             price = "免费" if g["is_free"] else f"¥{float(g['price_cny'] or 0):g}"
-            lines.append(f"{i}. **《{g['name']}》** — {price} | 支持 {g.get('max_players') or '?'} 人在线合作")
+            coop_label = "在线合作" if mode == "online" else ("本地合作" if mode == "local" else "在线/本地合作")
+            lines.append(f"{i}. **《{g['name']}》** — {price} | 支持 {g.get('max_players') or '?'} 人{coop_label}")
             lines.append(f"   - 📊 **口碑**：全语言 {g.get('positive_pct', 0)}%（{tier['zh']}，{g.get('total_reviews', 0)}篇）｜简中 {g.get('schinese_pct') if g.get('schinese_pct') is not None else '—'}%")
             quotes = g.get("quotes", [])
             for q in quotes[:1]:
-                lines.append(f"   - 💡 **推荐理由**：> {q.get('quote_text', '')}（[查看原评]({q.get('review_url', '')})）")
+                lines.append(f"   - 💡 **推荐理由（来自玩家评测）**：> {q.get('quote_text', '')}（👍 {q.get('votes_helpful', 0)} 人觉得有用 · [查看原评]({q.get('review_url', '')})）")
         lines.append("")
     lines += ["---", "#### ⚠️ 避雷榜（同筛选条件下容易踩坑的游戏）"]
-    lines += [f"- ❌ **《{g['name']}》** — {g.get('avoid_reasons') or REVIEW_TIERS.get(int(g.get('review_score') or 0), REVIEW_TIERS[0])['zh']}" for g in avoid] or ["- 暂无"]
+    avoid_lines = []
+    for g in avoid:
+        reasons = g.get("avoid_reasons") or []
+        reason_text = "、".join(map(str, reasons)) if isinstance(reasons, list) else str(reasons)
+        avoid_lines.append(f"- ❌ **《{g['name']}》** — {reason_text or REVIEW_TIERS.get(int(g.get('review_score') or 0), REVIEW_TIERS[0])['zh']}")
+        for q in (g.get("negative_quotes") or [])[:1]:
+            avoid_lines.append(f"  - > {q.get('quote_text', '')}（👍 {q.get('votes_helpful', 0)} 人觉得有用 · [原评]({q.get('review_url', '')})）")
+    lines += avoid_lines or ["- 暂无"]
     return "\n".join(lines)
 
 
@@ -155,7 +166,8 @@ def recommend_coop_games(horror: Optional[Literal["none", "mild", "scary", "any"
         ids = {g["appid"] for values in groups.values() for g in values}
         avoid = [_format_game(g, conn) for g in db.get_avoid_list(conn, 20) if int(g["appid"]) not in excluded and int(g["appid"]) not in ids and (horror in {"any", g.get("horror_level", "none")}) and (not players or g.get("max_players") is None or int(g.get("max_players")) >= players) and (mode == "any" or (mode == "online" and g.get("online_coop")) or (mode == "local" and g.get("local_coop")))]
         avoid = [g for g in avoid if budget == "any" or (budget == "free_or_demo" and (g["is_free"] or g["has_demo"])) or (budget == "under_50" and float(g.get("price_cny") or 0) < 50) or (budget == "any_paid" and not g["is_free"])][:3]
-        return {"status": "ok", "groups": groups, "avoid_list": avoid, "meta": {"excluded_appids": sorted(excluded), "count": sum(map(len, groups.values()))}, "markdown_preview": _markdown(groups, avoid, players, horror, budget, mode)}
+        query = {"horror": horror, "budget": budget, "players": players, "mode": mode, "session_duration": session_duration}
+        return {"status": "ok", "groups": groups, "avoid_list": avoid, "query": query, "meta": {"excluded_appids": sorted(excluded), "count": sum(map(len, groups.values())), "session_duration": session_duration, "session_duration_advisory": True}, "markdown_preview": _markdown(groups, avoid, players, horror, budget, mode)}
     finally:
         conn.close()
 

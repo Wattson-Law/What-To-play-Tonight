@@ -25,3 +25,11 @@
 - Markdown 增加推荐评测原句和原评 URL，并展示模式。
 
 验证：`pytest -q` → 9 passed。
+
+## Fix Round 2
+
+- `session_duration` 保留在工具签名，并写入返回的 `query` 与 `meta`；当前作为提示性条件（快照无时长字段），confirmed 后不会重复追问。
+- Markdown 模式标签改为 online、local/co-op、online/local。
+- 推荐评测和避雷差评均展示“来自玩家评测”、有用票数与原评 URL；避雷原因使用中文连接文本。
+
+验证：`pytest -q` 与 `python -m unittest discover -s tests -q` 均通过（9 tests）。
