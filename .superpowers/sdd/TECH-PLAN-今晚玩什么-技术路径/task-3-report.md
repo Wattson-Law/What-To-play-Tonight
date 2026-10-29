@@ -33,3 +33,10 @@
 - 推荐评测和避雷差评均展示“来自玩家评测”、有用票数与原评 URL；避雷原因使用中文连接文本。
 
 验证：`pytest -q` 与 `python -m unittest discover -s tests -q` 均通过（9 tests）。
+
+## Final evidence wording fix
+
+- 避雷负面引用明确标注“避雷证据（来自玩家评测）”。
+- 增加离线断言，确保带负面引用的避雷榜 Markdown 包含该归因。
+
+验证：pytest 与 unittest 均 9 tests 通过。

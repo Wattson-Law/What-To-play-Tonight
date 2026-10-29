@@ -139,7 +139,7 @@ def _markdown(groups, avoid, players, horror, budget, mode="online"):
         reason_text = "、".join(map(str, reasons)) if isinstance(reasons, list) else str(reasons)
         avoid_lines.append(f"- ❌ **《{g['name']}》** — {reason_text or REVIEW_TIERS.get(int(g.get('review_score') or 0), REVIEW_TIERS[0])['zh']}")
         for q in (g.get("negative_quotes") or [])[:1]:
-            avoid_lines.append(f"  - > {q.get('quote_text', '')}（👍 {q.get('votes_helpful', 0)} 人觉得有用 · [原评]({q.get('review_url', '')})）")
+            avoid_lines.append(f"  - 💡 **避雷证据（来自玩家评测）**：> {q.get('quote_text', '')}（👍 {q.get('votes_helpful', 0)} 人觉得有用 · [原评]({q.get('review_url', '')})）")
     lines += avoid_lines or ["- 暂无"]
     return "\n".join(lines)
 
