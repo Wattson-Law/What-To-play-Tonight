@@ -1,5 +1,0 @@
-mcp[cli]
-httpx
-beautifulsoup4
-lxml
-pydantic
