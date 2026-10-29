@@ -30,3 +30,6 @@ Status: complete. Repaired Steam client syntax, corrected tagdata endpoint, adde
 
 ## Final review fixes
 Added non-mutating missing-DB verification, optional raw review substring checks, Steam review count/score mapping and percentage calculation. Import/help/full unittest checks pass.
+
+## Final blocker fix
+Repaired verify_snapshot newline syntax and switched builder to normalized review summary fields. Import/help/full tests passed; missing-db check returns nonzero without creating the file.
