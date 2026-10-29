@@ -1,0 +1,8 @@
+.venv/
+__pycache__/
+*.pyc
+.env
+data/user_log.json
+data/*.sqlite
+!data/games.sqlite
+.superpowers/sdd/
