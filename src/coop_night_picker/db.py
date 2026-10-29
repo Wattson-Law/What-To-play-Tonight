@@ -32,10 +32,13 @@ def recommend_games(conn, *, horror='any', budget='any', players=None, mode='onl
  if horror in {'none','mild','scary'}: sql+=' AND horror_level=?'; args.append(horror)
  if budget=='free_or_demo': sql+=' AND (is_free=1 OR has_demo=1)'
  elif budget=='under_50': sql+=' AND price_cny<50'
+ elif budget=='any_paid': sql+=' AND is_free=0'
  if players: sql+=' AND (max_players IS NULL OR max_players>=?)'; args.append(players)
  if mode=='online': sql+=' AND online_coop=1'
  elif mode=='local': sql+=' AND local_coop=1'
  sql+=' ORDER BY review_score DESC, positive_pct DESC LIMIT ?'; args.append(limit)
  return [_decode(r) for r in conn.execute(sql,args)]
 def get_avoid_list(conn, limit=20): return [_decode(r) for r in conn.execute('SELECT * FROM games WHERE is_avoid=1 ORDER BY review_score ASC LIMIT ?',(limit,))]
+
+
 
