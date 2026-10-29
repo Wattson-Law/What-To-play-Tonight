@@ -13,7 +13,7 @@ class SteamClient:
   if httpx is None:return {'ok':False,'unavailable':True}
   for host in self.hosts:
    try:
-    with httpx.Client(proxy=self.proxy,follow_redirects=False,timeout=20,transport=self.transport) as c:r=c.get(host.rstrip('/')+'/'+path.lstrip('/'),params=params)
+    time.sleep(max(0,self.throttle-(time.time()-self._last))); self._last=time.time()\n    with httpx.Client(proxy=self.proxy,follow_redirects=False,timeout=20,headers={'User-Agent':'Mozilla/5.0'},transport=self.transport) as c:r=c.get(host.rstrip('/')+'/'+path.lstrip('/'),params=params)
     if r.status_code in {301,302,303,307,308}: continue
     if 200<=r.status_code<300:
      try:d=r.json()
@@ -30,3 +30,4 @@ class SteamClient:
   if review_type:p['review_type']=review_type
   return self._request(f'appreviews/{appid}',**p)
  def tagdata(self,appid=None,lang='schinese'):return self._request(f'tagdata/populartags/{lang}')
+
