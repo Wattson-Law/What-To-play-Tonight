@@ -11,6 +11,8 @@ python -m pip install -e .
 python -m coop_night_picker.server
 ```
 
+项目固定使用 MCP SDK 1.x（`mcp[cli]>=1.9,<2`），以保证 FastMCP 导入路径兼容。
+
 MCP 客户端配置示例（`PYTHONPATH` 使用绝对路径）：
 
 ```json
@@ -38,12 +40,15 @@ python scripts/build_snapshot.py --limit 300 --with-reviews
 python scripts/verify_snapshot.py
 ```
 
-没有网络时可使用离线 fixture：
+没有网络时可先生成一个用于校验的最小 fixture，再运行校验：
 
 ```powershell
-python scripts/build_snapshot.py --offline-fixture tmp-fixtures --limit 20 --with-reviews
-python scripts/verify_snapshot.py --db data/games.sqlite
+python scripts/create_offline_fixture.py --output tmp-fixtures/valid.sqlite
+python scripts/verify_snapshot.py --db tmp-fixtures/valid.sqlite
 ```
+
+`tmp-fixtures/` 是本地临时目录并被 `.gitignore` 忽略；若要测试 `build_snapshot.py --offline-fixture`，请提供自己的 Steam HTML/JSON fixture 文件夹。
+空数据库只适合本地冒烟测试，可显式使用 `python scripts/verify_snapshot.py --db empty.sqlite --allow-empty`；CI 正常校验会拒绝空快照。
 
 网络诊断是可选的，不会改变快照：
 

@@ -41,6 +41,8 @@ def main(argv=None):
   pos=[r for r in reviews if r.get('voted_up')]; neg=[r for r in reviews if not r.get('voted_up')]; reasons=build_avoid_reasons(neg); g['avoid_reasons_json']=reasons; g['is_avoid']=int(g['review_score']<=5 or (g.get('schinese_pct') is not None and g.get('positive_pct') is not None and g['positive_pct']-g['schinese_pct']>=15) or len(reasons)>=3)
   if not a.dry_run:
    upsert_game(c,g)
+   c.execute('DELETE FROM game_quotes WHERE appid=?', (aid,))
+   c.commit()
    for group,cap in ((pos,3),(neg,2)):
     allq=[]
     for rr in group:

@@ -23,3 +23,12 @@
 
 - Steam availability is environment-dependent. `appreviews` may be blocked; the builder and server treat absent review payloads as empty evidence and continue with the snapshot.
 - FastMCP is optional for pure offline tool logic; this environment exposes the `mcp` package name but not an importable `FastMCP`, so only that registration assertion is skipped.
+
+## Fix round 1 (2026-10-29)
+
+- Workflow now stages `data/games.sqlite` before checking `git diff --staged --quiet`, covering both new and changed snapshots without empty commits.
+- Acceptance tests now assert the avoid list, scary-game exclusion under `horror="none"`, and negative review evidence attribution.
+- Added `scripts/create_offline_fixture.py`; README and acceptance commands now explain how to create the ignored temporary fixture directory.
+- Re-ran `pytest -q`: `10 passed, 1 skipped`; fixture verification succeeded; PyYAML load reported `yaml ok`.
+- Pinned `mcp[cli]>=1.9,<2` for the supported FastMCP import path.
+- Snapshot builds now replace prior quotes per appid before inserting refreshed evidence; normal verification rejects empty snapshots, with `--allow-empty` reserved for local smoke tests.

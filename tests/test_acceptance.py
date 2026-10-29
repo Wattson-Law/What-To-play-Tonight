@@ -46,8 +46,11 @@ class OfflineAcceptance(unittest.TestCase):
         result = server.recommend_coop_games("none", "free_or_demo", 2, confirmed=True)
         self.assertEqual(result["status"], "ok")
         self.assertIn("9", result["groups"])
+        self.assertIn(12, [g["appid"] for g in result["avoid_list"]])
+        self.assertNotIn(11, [g["appid"] for values in result["groups"].values() for g in values])
         self.assertIn("Local Hero", result["markdown_preview"])
         self.assertIn("避雷榜", result["markdown_preview"])
+        self.assertIn("避雷证据（来自玩家评测）", result["markdown_preview"])
         self.assertEqual(server.get_game_card(10)["status"], "ok")
         self.assertTrue(server.get_game_card(10)["positive_quotes"])
         self.assertEqual(server.resolve_game("Local", limit=1)["meta"]["source"], "local")
@@ -65,4 +68,3 @@ class OfflineAcceptance(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

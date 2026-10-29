@@ -7,7 +7,7 @@ name = "coop-night-picker"
 version = "0.1.0"
 description = "Co-op game night picker"
 requires-python = ">=3.11"
-dependencies = ["mcp[cli]", "httpx", "beautifulsoup4", "lxml", "pydantic"]
+dependencies = ["mcp[cli]>=1.9,<2", "httpx", "beautifulsoup4", "lxml", "pydantic"]
 
 [project.scripts]
 coop-night-picker-probe = "coop_night_picker.probe:main"
