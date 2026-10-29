@@ -45,3 +45,6 @@ Offline keyed appdetails mappings now produce candidates and companion metadata 
 
 ## Summary extractor regression fix
 Restored derive_review_summary with normalized Steam global/schinese mappings. Build module import, help, and full unittest pass.
+
+## Final Steam/probe fix wave
+Corrected probe endpoint paths, restored a clean importable Steam client with env host/cache support and review query parameters. Full unittest: 11 passed, 1 skipped.
