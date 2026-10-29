@@ -27,8 +27,9 @@ class SteamClient:
     time.sleep(.1*(2**attempt))
   return {'ok':False,'unavailable':True,**(last if isinstance(last,dict) else {'error':str(last)})}
  def appdetails(self,appid): return self._request('api/appdetails',appids=appid,cc='cn',l='schinese')
- def store_search(self,query,**params): return self._request('search/results',term=query,**params)
+ def store_search(self,query,**params):\n  raw=self._request('search/results',term=query,**params)\n  if isinstance(raw,dict) and 'results_html' in raw: return {'items': raw.get('items',[]), 'results_html': raw.get('results_html','')}\n  return raw\n
  search_results=store_search
  def store_page(self,appid): return self._request(f'app/{appid}/',l='schinese',cc='cn')
  def appreviews(self,appid): return self._request(f'appreviews/{appid}',json=1,language='schinese',filter='all',purchase_type='all')
- def tagdata(self,appid,lang='schinese'): return self._request(f'app/{appid}/',l=lang,cc='cn')
+ def tagdata(self,appid=None,lang='schinese'):\n  raw=self._request(f'tagdata/populartags/{lang}')\n  if isinstance(raw,dict): return raw.get('tags',raw.get('data',raw))\n  return raw
+

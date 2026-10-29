@@ -17,3 +17,10 @@ Changes: candidate pool merging and offline HTML/JSON parsing in `build_snapshot
 Tests: `PYTHONPATH=src python -m unittest discover -s tests -v` — 6 tests passed.
 
 Concerns: fixture conventions remain intentionally lightweight; unavailable live review endpoints continue with metadata-only behavior.
+## Fix round 2
+
+Status: complete
+
+Implemented stable search parsing, correct tagdata endpoint, one-client snapshot enrichment for live/offline fixtures, review summary extraction, avoid criteria, bounded multi-review quote insertion with valid URLs, and stricter verification of required indexes and tier distributions.
+
+Tests: `PYTHONPATH=src python -m unittest discover -s tests -v` — 6 passed.
