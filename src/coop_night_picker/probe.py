@@ -11,7 +11,7 @@ import httpx
 
 REDIRECT_STATUSES = {301, 302, 303, 307, 308}
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0 Safari/537.36"
-PATHS = ("appdetails", "search/results", "appreviews/548430?json=1")
+PATHS = ("api/appdetails?appids=548430", "search/results/?query=&start=0&count=10", "appreviews/548430?json=1&language=schinese&filter=all&purchase_type=all")
 
 
 def build_url(host: str, path: str) -> str:
@@ -91,3 +91,4 @@ def main(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+

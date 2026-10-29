@@ -9,7 +9,7 @@ USER_AGENT='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/
 REDIRECTS={301,302,303,307,308}
 class SteamClient:
  def __init__(self,hosts=None,cache_dir='data/http-cache',proxy=None,throttle=1.0,retries=1,transport=None):
-  self.hosts=hosts or ['https://store.steampowered.com','https://steamstore-a.akamaihd.net']; self.cache=Path(cache_dir); self.cache.mkdir(parents=True,exist_ok=True); self.proxy=proxy or os.getenv('STEAM_PROXY'); self.throttle=throttle; self.retries=retries; self.transport=transport; self._last=0
+  self.hosts=hosts or ([os.getenv('STEAM_HOST')] if os.getenv('STEAM_HOST') else ['https://store.steampowered.com','https://steamstore-a.akamaihd.net']); self.cache=Path(os.getenv('STEAM_CACHE_DIR',cache_dir)); self.cache.mkdir(parents=True,exist_ok=True); self.proxy=proxy or os.getenv('STEAM_PROXY'); self.throttle=throttle; self.retries=retries; self.transport=transport; self._last=0
  def _request(self,path,**params):
   key=hashlib.sha256((path+json.dumps(params,sort_keys=True)).encode()).hexdigest(); cp=self.cache/(key+'.json')
   if cp.exists():
@@ -39,8 +39,9 @@ class SteamClient:
   return raw
  search_results=store_search
  def store_page(self,appid): return self._request(f'app/{appid}/',l='schinese',cc='cn')
- def appreviews(self,appid): return self._request(f'appreviews/{appid}',json=1,language='schinese',filter='all',purchase_type='all')
+ def appreviews(self,appid,review_type=None,playtime_filter_min=1):\n  p={'json':1,'language':'schinese','filter':'all','purchase_type':'all','num_per_page':50,'playtime_filter_min':playtime_filter_min}\n  if review_type: p['review_type']=review_type\n  return self._request(f'appreviews/{appid}',**p)
  def tagdata(self,appid=None,lang='schinese'):
   raw=self._request(f'tagdata/populartags/{lang}')
   if isinstance(raw,dict): return raw.get('tags',raw.get('data',raw))
   return raw
+
