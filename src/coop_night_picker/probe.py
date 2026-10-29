@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import sys
 import time
 from typing import Any
 
@@ -54,6 +55,25 @@ def combination_failed(record: dict[str, Any]) -> bool:
     return all(not (isinstance(item.get("status"), int) and 200 <= item["status"] < 300) for item in record["probes"])
 
 
+def build_guidance(records: list[dict[str, Any]]) -> list[str]:
+    """Return actionable proxy and fallback guidance for failed review probes."""
+    proxy_review_failed = any(
+        record.get("combination", "").startswith(("C", "D"))
+        and any(
+            "/appreviews/" in item.get("url", "")
+            and not (isinstance(item.get("status"), int) and 200 <= item["status"] < 300)
+            for item in record.get("probes", [])
+        )
+        for record in records
+    )
+    if not proxy_review_failed:
+        return []
+    return [
+        "Clash guidance: add these highest-priority rules: DOMAIN-SUFFIX,steampowered.com,PROXY and DOMAIN-SUFFIX,steamcommunity.com,PROXY.",
+        "Fallback Mode: use steamstore-a.akamaihd.net/app/<id>/?l=schinese&cc=cn for tags and nine-tier summaries; leave appreviews to the overseas GitHub Actions snapshot job.",
+    ]
+
+
 def run_combination(name: str, host: str, proxy: str | None) -> dict[str, Any]:
     transport = None
     results = []
@@ -78,13 +98,23 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--strict", action="store_true", help="exit nonzero when every probe in a combination fails")
     parser.add_argument("--json", action="store_true", dest="as_json", help="emit JSON only")
     args = parser.parse_args(argv)
-    records = [run_combination("A direct + official", "https://store.steampowered.com", None), run_combination("B direct + CDN", "https://steamstore-a.akamaihd.net", None)]
-    if args.proxy is not None:
-        proxy = os.environ.get("STEAM_PROXY", "http://127.0.0.1:7890") if args.proxy == "__default__" else args.proxy
-        records.extend([run_combination("C proxy + official", "https://store.steampowered.com", proxy), run_combination("D proxy + CDN", "https://steamstore-a.akamaihd.net", proxy)])
-    print(json.dumps(records, ensure_ascii=False, indent=2))
-    if not args.as_json:
+    proxy = os.environ.get("STEAM_PROXY", "http://127.0.0.1:7890") if args.proxy in (None, "__default__") else args.proxy
+    records = [
+        run_combination("A direct + official", "https://store.steampowered.com", None),
+        run_combination("B direct + CDN", "https://steamstore-a.akamaihd.net", None),
+        run_combination("C proxy + official", "https://store.steampowered.com", proxy),
+        run_combination("D proxy + CDN", "https://steamstore-a.akamaihd.net", proxy),
+    ]
+    guidance = build_guidance(records)
+    if args.as_json:
+        print(json.dumps(records, ensure_ascii=False, indent=2))
+        for message in guidance:
+            print(message, file=sys.stderr)
+    else:
+        print(json.dumps(records, ensure_ascii=False, indent=2))
         print(format_table(records))
+        if guidance:
+            print("\n".join(guidance))
     if args.strict and any(combination_failed(r) for r in records):
         return 1
     return 0

@@ -50,13 +50,15 @@ python scripts/verify_snapshot.py --db tmp-fixtures/valid.sqlite --allow-empty
 `tmp-fixtures/` 是本地临时目录并被 `.gitignore` 忽略；若要测试 `build_snapshot.py --offline-fixture`，请提供自己的 Steam HTML/JSON fixture 文件夹。
 小型或空数据库只适合本地冒烟测试，可显式使用 `--allow-empty`；CI 正常校验要求至少 50 条记录，并覆盖免费、Demo、恐怖和非恐怖样本。
 
-网络诊断是可选的，不会改变快照：
+网络诊断是可选的，不会改变快照；不传 `--proxy` 时也会使用 `STEAM_PROXY` 或 `http://127.0.0.1:7890` 执行四组直连/代理探测：
 
 ```powershell
 python scripts/probe_network.py --json
 ```
 
 Steam 的 `appreviews` 可能被区域网络、代理或服务端策略拦截；构建器会保留商店页和已有字段，评测缺失时仍能生成可验证快照。服务运行时只查询本地快照；`resolve_game` 在本地结果不足时才尝试 Steam 搜索。
+
+探针发现代理下的 `appreviews` 重定向或连接失败时，会提示 Clash 规则 `DOMAIN-SUFFIX,steampowered.com,PROXY`、`DOMAIN-SUFFIX,steamcommunity.com,PROXY`，并给出商店页解析的 Fallback Mode。
 
 ## MCP 工具与提示词
 

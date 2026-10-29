@@ -1,7 +1,7 @@
 from __future__ import annotations
 import html,json,re,math
 from collections import Counter
-from .constants import REVIEW_KEYWORDS
+from .constants import CATEGORY_ZH, REVIEW_KEYWORDS
 try: from bs4 import BeautifulSoup
 except ImportError: BeautifulSoup=None
 def parse_search_html(raw):
@@ -15,7 +15,10 @@ def parse_search_html(raw):
  return out
 def parse_appdetails(payload,appid=None):
  d=payload.get(str(appid),payload) if isinstance(payload,dict) else {}; d=d.get('data',d) if isinstance(d,dict) else {}; p=d.get('price_overview') or {}; cats=d.get('categories') or []
- return {'appid':appid or d.get('steam_appid'),'name':d.get('name',''),'type':d.get('type','game'),'is_free':int(d.get('is_free',False)),'price_cny':p.get('final',0)/100,'discount_pct':p.get('discount_percent',0),'categories_json':[x.get('description',x) for x in cats],'short_desc':d.get('short_description'),'header_image':d.get('header_image'),'has_demo':int(bool(d.get('demos'))),'demo_appid':(d.get('demos') or [{}])[0].get('appid'),'fullgame_appid':(d.get('fullgame') or {}).get('appid')}
+ category_ids=[int(x['id']) for x in cats if isinstance(x,dict) and x.get('id') is not None]
+ category_names=[CATEGORY_ZH.get(int(x['id']),x.get('description','')) if isinstance(x,dict) else str(x) for x in cats]
+ app_type=d.get('type','game'); demos=d.get('demos') or []
+ return {'appid':appid or d.get('steam_appid'),'name':d.get('name',''),'type':app_type,'is_free':int(d.get('is_free',False)),'price_cny':p.get('final',0)/100,'discount_pct':p.get('discount_percent',0),'categories_json':category_names,'category_ids':category_ids,'short_desc':d.get('short_description'),'header_image':d.get('header_image'),'has_demo':int(app_type=='demo' or bool(demos)),'demo_appid':(demos or [{}])[0].get('appid'),'fullgame_appid':(d.get('fullgame') or {}).get('appid')}
 def parse_store_page(raw):
  text=raw if isinstance(raw,str) else raw.get('text',raw.get('__text__',''))
  tags=[]; m=re.search(r'InitAppTagModal\s*\([^,]+,\s*(\[.*?\])\s*\)',text,re.S)

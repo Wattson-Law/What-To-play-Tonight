@@ -7,7 +7,9 @@ $env:PYTHONPATH="src"
 python -m pytest -q
 ```
 
-结果：`10 passed, 1 skipped`（包含 `tests/test_acceptance.py` 的离线四工具验收；仅 FastMCP 注册断言因依赖不可导入而跳过，不访问 Steam）。
+结果：`16 passed, 1 skipped`（包含 `tests/test_acceptance.py` 的离线四工具验收和数据层回归测试；仅 FastMCP 注册断言因依赖不可导入而跳过，不访问 Steam）。
+
+交互裁决：方案正文和产品交互草案对追问数量有差异，当前实现采用四问——人数、恐怖接受度、预算和游玩时长；`session_duration` 作为 advisory 元数据保留，不参与 SQLite 过滤。
 
 ```powershell
 python scripts/create_offline_fixture.py --output tmp-fixtures/valid.sqlite
@@ -30,7 +32,7 @@ python scripts/verify_snapshot.py --db tmp-fixtures/missing.sqlite
 python scripts/probe_network.py --json
 ```
 
-实际结果：退出码 `0`；官方直连端点记录 `classification=error`，CDN 组合部分为 `ok` 或 `redirect_trap`。该命令仅作诊断，不影响离线测试和构建。
+实际结果：退出码 `0`；脚本默认执行直连官方、直连 CDN、代理官方、代理 CDN 四组探测，并在代理下的 `appreviews` 失败时输出 Clash 规则和 Fallback Mode 提示。该命令仅作诊断，不影响离线测试和构建。
 
 ```powershell
 python -m coop_night_picker.server

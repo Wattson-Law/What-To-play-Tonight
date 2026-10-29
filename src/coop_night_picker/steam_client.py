@@ -12,16 +12,19 @@ class SteamClient:
    x=json.loads(cp.read_text(encoding='utf8')); return x.get('__text__','') if isinstance(x,dict) and '__text__' in x else x
   if httpx is None:return {'ok':False,'unavailable':True}
   for host in self.hosts:
-   try:
-    time.sleep(max(0,self.throttle-(time.time()-self._last)))
-    self._last=time.time()
-    with httpx.Client(proxy=self.proxy,follow_redirects=False,timeout=20,headers={"User-Agent":"Mozilla/5.0"},transport=self.transport) as c: r=c.get(host.rstrip("/")+"/"+path.lstrip("/"),params=params)
-    if r.status_code in {301,302,303,307,308}: continue
-    if 200<=r.status_code<300:
-     try:d=r.json()
-     except Exception:d=r.text
-     cp.write_text(json.dumps(d,ensure_ascii=False) if not isinstance(d,str) else json.dumps({'__text__':d},ensure_ascii=False),encoding='utf8'); return d
-   except Exception: pass
+   for attempt in range(self.retries + 1):
+    try:
+     time.sleep(max(0,self.throttle-(time.time()-self._last)))
+     self._last=time.time()
+     with httpx.Client(proxy=self.proxy,follow_redirects=False,timeout=20,headers={"User-Agent":"Mozilla/5.0"},transport=self.transport) as c: r=c.get(host.rstrip("/")+"/"+path.lstrip("/"),params=params)
+     if r.status_code in {301,302,303,307,308}: break
+     if 200<=r.status_code<300:
+      try:d=r.json()
+      except Exception:d=r.text
+      cp.write_text(json.dumps(d,ensure_ascii=False) if not isinstance(d,str) else json.dumps({'__text__':d},ensure_ascii=False),encoding='utf8'); return d
+    except Exception: pass
+    if attempt < self.retries:
+     time.sleep(min(2 ** attempt, 8))
   return {'ok':False,'unavailable':True}
  def appdetails(self,appid):return self._request('api/appdetails',appids=appid,cc='cn',l='schinese')
  def store_search(self,query,**params):return self._request('search/results',term=query,**params)
