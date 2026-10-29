@@ -5,7 +5,7 @@ sys.path.insert(0,str(Path(__file__).parents[1]/'src'))
 from coop_night_picker.constants import REVIEW_TIERS
 REQ={'games':{'appid','name','review_score','review_tier_zh'},'game_quotes':{'appid','quote_text','review_url'}}
 def main(argv=None):
- p=argparse.ArgumentParser(); p.add_argument('--db',default='data/games.sqlite'); a=p.parse_args(argv); e=[]
+ p=argparse.ArgumentParser(); p.add_argument('--db',default='data/games.sqlite'); p.add_argument('--raw-reviews-dir'); a=p.parse_args(argv); e=[]\n if not Path(a.db).exists(): print('missing database'); return 1
  try:c=sqlite3.connect(a.db); c.row_factory=sqlite3.Row
  except Exception as x: print(x); return 1
  for t,cols in REQ.items():
@@ -25,3 +25,4 @@ def main(argv=None):
  if e: print('\n'.join(e)); return 1
  return 0
 if __name__=='__main__': raise SystemExit(main())
+
