@@ -33,3 +33,6 @@ Added non-mutating missing-DB verification, optional raw review substring checks
 
 ## Final blocker fix
 Repaired verify_snapshot newline syntax and switched builder to normalized review summary fields. Import/help/full tests passed; missing-db check returns nonzero without creating the file.
+
+## Final acceptance fixes
+Added raw review fixture substring validation and aggregate per-game quote caps. Full unittest passed.
