@@ -44,11 +44,11 @@ python scripts/verify_snapshot.py
 
 ```powershell
 python scripts/create_offline_fixture.py --output tmp-fixtures/valid.sqlite
-python scripts/verify_snapshot.py --db tmp-fixtures/valid.sqlite
+python scripts/verify_snapshot.py --db tmp-fixtures/valid.sqlite --allow-empty
 ```
 
 `tmp-fixtures/` 是本地临时目录并被 `.gitignore` 忽略；若要测试 `build_snapshot.py --offline-fixture`，请提供自己的 Steam HTML/JSON fixture 文件夹。
-空数据库只适合本地冒烟测试，可显式使用 `python scripts/verify_snapshot.py --db empty.sqlite --allow-empty`；CI 正常校验会拒绝空快照。
+小型或空数据库只适合本地冒烟测试，可显式使用 `--allow-empty`；CI 正常校验要求至少 50 条记录，并覆盖免费、Demo、恐怖和非恐怖样本。
 
 网络诊断是可选的，不会改变快照：
 

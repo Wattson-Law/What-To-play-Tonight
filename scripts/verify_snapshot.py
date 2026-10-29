@@ -16,7 +16,11 @@ def main(argv=None):
  if 'idx_quotes_appid' not in {r[1] for r in c.execute("PRAGMA index_list('game_quotes')")}: e.append('missing idx_quotes_appid')
  try:
   game_count=c.execute('SELECT COUNT(*) FROM games').fetchone()[0]
-  if game_count == 0 and not a.allow_empty: e.append('empty snapshot (use --allow-empty only for local smoke tests)')
+  if not a.allow_empty:
+   if game_count < 50: e.append(f'too-small snapshot: games={game_count}, need at least 50 (use --allow-empty only for local smoke tests)')
+   for clause, label in (("is_free=1", "free"), ("has_demo=1", "demo"), ("horror_level='scary'", "scary"), ("horror_level='none'", "non-horror")):
+    if not c.execute(f'SELECT 1 FROM games WHERE {clause} LIMIT 1').fetchone(): e.append(f'missing required sample: {label}')
+   if c.execute('SELECT COUNT(DISTINCT review_score) FROM games').fetchone()[0] < 2: e.append('review_score covers fewer than two tiers')
   tiers={}
   for r in c.execute('SELECT review_score,review_tier_zh FROM games'):
    tiers[r[0]]=tiers.get(r[0],0)+1

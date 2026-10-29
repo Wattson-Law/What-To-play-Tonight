@@ -11,7 +11,7 @@ python -m pytest -q
 
 ```powershell
 python scripts/create_offline_fixture.py --output tmp-fixtures/valid.sqlite
-python scripts/verify_snapshot.py --db tmp-fixtures/valid.sqlite
+python scripts/verify_snapshot.py --db tmp-fixtures/valid.sqlite --allow-empty
 ```
 
 结果：退出码 `0`，输出 `games=1 quotes=1 tiers={9: 1}`；命令只读数据库。
@@ -22,7 +22,7 @@ python scripts/verify_snapshot.py --db tmp-fixtures/missing.sqlite
 
 结果：输出 `missing database`，退出码 `1`，没有创建或修改文件。
 
-空快照正常校验输出 `empty snapshot ...` 并退出码 `1`；加 `--allow-empty` 时退出码 `0`，仅用于本地冒烟测试。
+小型 fixture 使用 `--allow-empty` 旁路最低 50 条及样本分布要求；生产快照正常校验会拒绝空或少于 50 条、缺少免费/Demo/恐怖/非恐怖样本的数据库。
 
 ```powershell
 python scripts/probe_network.py --json

@@ -31,4 +31,4 @@
 - Added `scripts/create_offline_fixture.py`; README and acceptance commands now explain how to create the ignored temporary fixture directory.
 - Re-ran `pytest -q`: `10 passed, 1 skipped`; fixture verification succeeded; PyYAML load reported `yaml ok`.
 - Pinned `mcp[cli]>=1.9,<2` for the supported FastMCP import path.
-- Snapshot builds now replace prior quotes per appid before inserting refreshed evidence; normal verification rejects empty snapshots, with `--allow-empty` reserved for local smoke tests.
+- Snapshot builds now replace prior quotes per appid before inserting refreshed evidence; normal verification enforces the plan's 50-game/sample-distribution minimum, with `--allow-empty` reserved for local smoke tests.
