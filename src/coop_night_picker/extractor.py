@@ -50,7 +50,7 @@ def extract_quotes(raw_review,voted_up=True,max_quotes=3,appid=None):
   assert s in text; out.append({'quote_text':s,'dimensions_json':ds,'voted_up':int(voted_up),'votes_helpful':votes,'recommendation_id':rid,'playtime_hours':round((raw_review.get('author') or {}).get('playtime_at_review',0)/60,2) if isinstance(raw_review,dict) else 0.0,'review_url':url or 'https://steamcommunity.com/'})
  return out
 def build_avoid_reasons(reviews):
- c=Counter(d for r in reviews for q in extract_quotes(r,False,99) for d in q['dimensions_json'] if d in {'network','dealbreaker'}); return [f'{k}({v}条提及)' for k,v in c.items()]
+ c=Counter();\n    for r in reviews:\n        ds={d for q in extract_quotes(r,False,99) for d in q['dimensions_json']}\n        for d in ds:\n            if d in {'network','dealbreaker'}: c[d]+=1\n    return [f'{k}({v}条提及)' for k,v in c.items()]
 def derive_review_summary(props):
     if isinstance(props,list): props=props[0] if props else {}
     if not isinstance(props,dict): return {}
@@ -63,5 +63,6 @@ def derive_review_summary(props):
     for x in (props.get('filter_options',{}) or {}).get('rgLanguageOutliers',[]) or []:
         if str(x.get('strLanguage','')).lower() in {'schinese','chinese'}: out['schinese']=norm(x)
     return out
+
 
 
