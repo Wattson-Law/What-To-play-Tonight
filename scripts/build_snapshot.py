@@ -19,7 +19,7 @@ def main(argv=None):
     o=json.loads(fp.read_text(encoding='utf8')); aid=o.get('appid') or (int(fp.stem) if fp.stem.isdigit() else None)
     if aid: merged[int(aid)]=o
  else:
-  for q in ({'category1':998,'category3':38},{'category1':10,'category3':38},{'category1':998,'tags':1667},{'category1':998,'tags':1721},{'category1':998,'tags':3978}):
+  for q in ({'category1':998,'category3':38},{'category1':10,'category3':38},{'category1':998,'tags':3843},{'category1':998,'tags':1685},{'category1':998,'tags':1667},{'category1':998,'tags':1721},{'category1':998,'tags':3978}):
    for x in _items(client.store_search('',count=a.limit,**q)): merged[int(x['appid'])]=x
  for aid,seed in list(merged.items())[:a.limit]:
   g=dict(seed.get('game',seed)); g['appid']=aid
@@ -45,5 +45,6 @@ def main(argv=None):
        q['appid']=aid; insert_quote(c,q)
  print(f'processed {min(a.limit,len(merged))} games; db={a.db}; dry_run={a.dry_run}'); return 0
 if __name__=='__main__': raise SystemExit(main())
+
 
 
