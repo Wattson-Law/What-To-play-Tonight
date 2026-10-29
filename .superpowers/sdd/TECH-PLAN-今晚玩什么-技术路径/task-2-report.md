@@ -27,3 +27,6 @@ Tests: `PYTHONPATH=src python -m unittest discover -s tests -v` — 6 passed.
 
 ## Fix round 3
 Status: complete. Repaired Steam client syntax, corrected tagdata endpoint, added real Steam review summary parsing, and preserved multi-review URL/cap behavior. Tests: import check, build_snapshot --help, and full unittest suite passed.
+
+## Final review fixes
+Added non-mutating missing-DB verification, optional raw review substring checks, Steam review count/score mapping and percentage calculation. Import/help/full unittest checks pass.
