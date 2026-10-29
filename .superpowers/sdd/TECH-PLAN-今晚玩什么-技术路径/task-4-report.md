@@ -15,7 +15,7 @@
 ## Verification
 
 - `PYTHONPATH=src pytest -q` -> `10 passed, 1 skipped`.
-- `python scripts/verify_snapshot.py --db tmp-fixtures/valid.sqlite` -> exit `0`, `games=1 quotes=1 tiers={9: 1}`.
+- `python scripts/verify_snapshot.py --db tmp-fixtures/valid.sqlite --allow-empty` -> exit `0`, `games=1 quotes=1 tiers={9: 1}` (the one-game fixture uses the documented local smoke-test bypass).
 - `python scripts/verify_snapshot.py --db tmp-fixtures/missing.sqlite` -> exit `1`, `missing database`; no file was created or modified.
 - `python scripts/probe_network.py --json` -> exit `0`; direct official probes were connection errors, CDN probes included one `ok` and redirect traps.
 
