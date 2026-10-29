@@ -16,6 +16,8 @@ python scripts/verify_snapshot.py --db tmp-fixtures/valid.sqlite --allow-empty
 
 结果：退出码 `0`，输出 `games=1 quotes=1 tiers={9: 1}`；命令只读数据库。
 
+重复执行生成器两次后仍输出同样的 `games=1 quotes=1 tiers={9: 1}`，说明 fixture 生成是幂等的。
+
 ```powershell
 python scripts/verify_snapshot.py --db tmp-fixtures/missing.sqlite
 ```

@@ -32,3 +32,5 @@
 - Re-ran `pytest -q`: `10 passed, 1 skipped`; fixture verification succeeded; PyYAML load reported `yaml ok`.
 - Pinned `mcp[cli]>=1.9,<2` for the supported FastMCP import path.
 - Snapshot builds now replace prior quotes per appid before inserting refreshed evidence; normal verification enforces the plan's 50-game/sample-distribution minimum, with `--allow-empty` reserved for local smoke tests.
+- Fix round 1 files include `pyproject.toml`, `scripts/build_snapshot.py`, `scripts/verify_snapshot.py`, `scripts/create_offline_fixture.py`, workflow, README, `.gitignore`, acceptance tests, acceptance docs, and this report.
+- The offline fixture generator now removes an existing output database before recreation, so repeated runs remain `games=1 quotes=1 tiers={9: 1}`.

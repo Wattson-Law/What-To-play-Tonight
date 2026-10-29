@@ -14,6 +14,9 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--output", default="tmp-fixtures/valid.sqlite")
     args = parser.parse_args(argv)
+    output = Path(args.output)
+    if output.exists():
+        output.unlink()
     conn = init_db(args.output)
     upsert_game(conn, {"appid": 9001, "name": "Offline Fixture", "review_score": 9,
                        "review_tier_zh": REVIEW_TIERS[9]["zh"], "online_coop": 1,
