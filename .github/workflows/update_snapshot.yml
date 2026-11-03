@@ -1,6 +1,14 @@
 name: Update game snapshot
 
 on:
+  push:
+    branches:
+      - main
+      - implementation
+    paths:
+      - "src/**"
+      - "scripts/**"
+      - ".github/workflows/update_snapshot.yml"
   schedule:
     - cron: "17 3 * * 1"
   workflow_dispatch:
@@ -18,8 +26,8 @@ jobs:
           python-version: "3.12"
       - name: Install dependencies
         run: python -m pip install -e .
-      - name: Build snapshot
-        run: python scripts/build_snapshot.py --limit 300 --with-reviews
+      - name: Build curator-driven snapshot with reviews
+        run: python scripts/build_snapshot.py --limit 120 --with-reviews
       - name: Verify snapshot
         run: python scripts/verify_snapshot.py
       - name: Commit changed snapshot
@@ -30,6 +38,6 @@ jobs:
           else
             git config user.name "github-actions[bot]"
             git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-            git commit -m "chore(data): update game snapshot"
+            git commit -m "chore(data): update curator-driven game snapshot [skip ci]"
             git push
           fi
