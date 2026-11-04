@@ -9,7 +9,7 @@ from unittest import mock
 
 import httpx
 
-from coop_night_picker import constants, db, extractor, server
+from coop_night_picker import constants, db, extractor, kook_bot, server
 from coop_night_picker.steam_client import SteamClient
 
 
@@ -221,3 +221,11 @@ class CuratorPipelineTest(unittest.TestCase):
                 self.assertGreaterEqual(res["meta"]["count"], 1)
                 self.assertIn("鉴赏家", res["markdown_preview"])
                 self.assertIn("R.E.P.O.", res["markdown_preview"])
+
+    def test_kook_bot_session_two_turn_and_direct_recommend(self):
+        session = kook_bot.KookBotSession(cooldown_sec=0.0)
+        with mock.patch.object(kook_bot, "call_llm_for_params", return_value=None):
+            first = session.handle_message("chan-1", "(met)2682988118(met) 今晚玩什么", is_mentioned=True)
+            self.assertIn("开黑选游助手", first)
+            second = session.handle_message("chan-1", "4人 恐怖 免费 独立", is_mentioned=False)
+            self.assertIn("今晚玩什么 · 筛选结果", second)

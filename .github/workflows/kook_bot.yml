@@ -1,0 +1,41 @@
+name: Run KOOK Game Night Bot
+
+on:
+  workflow_dispatch:
+    inputs:
+      runtime_hours:
+        description: "Continuous bot runtime hours (max 5.5 hours per run)"
+        required: false
+        default: "5"
+  schedule:
+    # Automatically start every day at 19:00 Beijing Time (11:00 UTC) for the evening game session
+    - cron: "0 11 * * *"
+
+permissions:
+  contents: read
+  models: read
+
+concurrency:
+  group: kook-bot-runner
+  cancel-in-progress: true
+
+jobs:
+  kook-bot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 340
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        run: python -m pip install -e .
+      - name: Run KOOK Bot
+        env:
+          KOOK_TOKEN: ${{ secrets.KOOK_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
+          LLM_BASE_URL: ${{ secrets.LLM_BASE_URL }}
+          LLM_MODEL: ${{ secrets.LLM_MODEL }}
+          KOOK_MAX_RUNTIME_SECONDS: "19000"
+        run: python scripts/run_kook_bot.py
