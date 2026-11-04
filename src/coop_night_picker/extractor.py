@@ -6,7 +6,7 @@ import math
 import re
 from collections import Counter
 
-from .constants import CATEGORY_ZH, REVIEW_KEYWORDS, TAG_ZH
+from .constants import CATEGORY_ZH, NEGATIVE_CURATOR_PATTERNS, REVIEW_KEYWORDS, TAG_ZH
 
 try:
     from bs4 import BeautifulSoup
@@ -105,6 +105,9 @@ def parse_curator_recommendations(payload_or_html, curator_name: str = "Steam鉴
 
         desc_el = rec.select_one(".recommendation_desc")
         blurb = re.sub(r"\s+", " ", desc_el.get_text(" ", strip=True)) if desc_el else ""
+        if blurb and re.search(NEGATIVE_CURATOR_PATTERNS, blurb, re.I):
+            attitude = "not_recommended"
+            voted_up = 0
         link_el = rec.select_one("a.recommendation_link") or cap
         review_url = (link_el.get("href", "") if link_el else "") or (
             f"https://store.steampowered.com/app/{appid}/?curator_clanid={clanid}" if clanid else f"https://store.steampowered.com/app/{appid}/"

@@ -168,7 +168,7 @@ def recommend_games(conn, *, horror="any", budget="any", players=None, mode="onl
     if budget == "free_or_demo":
         sql += " AND (is_free=1 OR has_demo=1)"
     elif budget == "under_50":
-        sql += " AND price_cny<50"
+        sql += " AND ((price_cny IS NOT NULL AND price_cny<50) OR is_free=1 OR has_demo=1)"
     elif budget == "any_paid":
         sql += " AND is_free=0"
     if players:
@@ -178,7 +178,11 @@ def recommend_games(conn, *, horror="any", budget="any", players=None, mode="onl
         sql += " AND online_coop=1"
     elif mode == "local":
         sql += " AND local_coop=1"
-    sql += " ORDER BY COALESCE(curator_count, 0) DESC, review_score DESC, positive_pct DESC LIMIT ?"
+    sql += (
+        " ORDER BY CASE WHEN curators_json LIKE '%Steam%' THEN 2"
+        " WHEN tags_json LIKE '%欢乐%' OR tags_json LIKE '%喜剧%' OR tags_json LIKE '%物理%' OR tags_json LIKE '%派对%' THEN 1 ELSE 0 END DESC,"
+        " COALESCE(curator_count, 0) DESC, review_score DESC, positive_pct DESC LIMIT ?"
+    )
     args.append(max(limit * 4, 200) if tag else limit)
     rows = [_decode(r) for r in conn.execute(sql, args)]
     if tag:

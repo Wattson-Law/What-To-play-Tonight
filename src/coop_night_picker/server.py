@@ -202,23 +202,33 @@ def _markdown(groups, avoid, players, horror, budget, mode="online", tag=None):
     lines = [title, ""]
     for score, games in groups.items():
         tier = REVIEW_TIERS[int(score)]
-        lines += [f"#### {tier['stars']} {tier['zh']}（Score {score}）"]
-        for i, g in enumerate(games, 1):
-            price = "免费" if g["is_free"] else f"¥{float(g['price_cny'] or 0):g}"
+        if int(score) == 0:
+            lines += ["**【🧪 整活新品 & 热门愿望单试玩专区（未发先火 / 刚出新游 / 免费Demo）】**"]
+        else:
+            lines += [f"**【{tier['stars']} {tier['zh']}（Score {score}）】**"]
+        display_cap = 2 if len(groups) >= 3 else 3
+        for i, g in enumerate(games[:display_cap], 1):
+            price = "免费" if g["is_free"] else (f"¥{float(g['price_cny']):g}" if g.get("price_cny") else "即将推出/免费试玩")
             if g.get("has_demo") and not g["is_free"]:
                 price += "（含免费Demo）"
             coop_label = "在线合作" if mode == "online" else ("本地合作" if mode == "local" else "在线/本地合作")
             lines.append(f"{i}. **《{g['name']}》** — {price} | 支持 {g.get('max_players') or '?'} 人{coop_label}")
+            if g.get("short_desc"):
+                lines.append(f"   - 🎯 **玩法设定**：{g['short_desc']}")
             if g.get("curator_count"):
                 curator_names = "、".join(g.get("curators") or [])
-                lines.append(f"   - 🏅 **鉴赏家精选**：入选 {g['curator_count']} 个买手榜单（{curator_names}）")
+                lines.append(f"   - 🏅 **鉴赏家/趋势精选**：入选 {g['curator_count']} 个精选榜单（{curator_names}）")
+            pos_pct = f"{float(g.get('positive_pct') or 0):.1f}%"
+            sc_pct = f"{float(g['schinese_pct']):.1f}%" if g.get("schinese_pct") is not None else "—"
             lines.append(
-                f"   - 📊 **口碑**：全语言 {g.get('positive_pct', 0)}%（{tier['zh']}，{g.get('total_reviews', 0)}篇）"
-                f"｜简中 {g.get('schinese_pct') if g.get('schinese_pct') is not None else '—'}%"
+                f"   - 📊 **口碑**：全语言 {pos_pct}（{tier['zh']}，{g.get('total_reviews', 0)}篇）"
+                f"｜简中 {sc_pct}"
             )
             quotes = g.get("quotes", [])
             for q in quotes[:1]:
                 q_text = q.get("quote_text", "")
+                if not q_text:
+                    continue
                 if str(q_text).startswith("[鉴赏家·"):
                     lines.append(f"   - 💡 **推荐理由（来自Steam鉴赏家评测）**：> {q_text}（[查看评测]({q.get('review_url', '')})）")
                 else:
@@ -227,7 +237,7 @@ def _markdown(groups, avoid, players, horror, budget, mode="online", tag=None):
                         f"（👍 {q.get('votes_helpful', 0)} 人觉得有用 · [查看原评]({q.get('review_url', '')})）"
                     )
         lines.append("")
-    lines += ["---", "#### ⚠️ 避雷榜（同筛选条件下容易踩坑的游戏）"]
+    lines += ["---", "**【⚠️ 避雷榜（同筛选条件下容易踩坑的游戏）】**"]
     avoid_lines = []
     for g in avoid:
         reasons = g.get("avoid_reasons") or []

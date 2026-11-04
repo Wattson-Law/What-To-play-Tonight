@@ -239,3 +239,75 @@ class CuratorPipelineTest(unittest.TestCase):
             direct = session.handle_message("chan-role2", "(rol)77999772(rol) 推荐4人恐怖独立游戏", is_mentioned=False)
             self.assertIsNotNone(direct)
             self.assertIn("今晚玩什么 · 筛选结果", direct)
+
+    def test_friendslop_feeds_negative_blurb_filter_and_kook_formatting(self):
+        # 1. FRIENDSLOP_FEEDS must cover popularwishlist, physics+funny, and demos
+        self.assertTrue(hasattr(constants, "FRIENDSLOP_FEEDS"))
+        feed_filters = [f.get("filter") for f in constants.FRIENDSLOP_FEEDS]
+        self.assertIn("popularwishlist", feed_filters)
+
+        # 2. A curator blurb complaining about "阉割" / "赶工作品" / "不耐玩" (like RE3) must be flipped to not_recommended
+        re3_html = """
+        <div>
+          <div role="button" class="recommendation">
+            <div>
+              <a data-ds-appid="952060" data-ds-tagids="[1667,19]" class="store_capsule price_inline"
+                 href="https://store.steampowered.com/app/952060/RE3/?curator_clanid=41542789">
+                <div class="capsule"><img src="https://example.com/re3.jpg" alt="Resident Evil 3"></div>
+                <div class="discount_block" data-price-final="3960" data-discount="60"></div>
+              </a>
+            </div>
+            <a href="https://store.steampowered.com/app/952060/RE3/?curator_clanid=41542789" class="recommendation_link">
+              <div class="recommendation_midcol">
+                <div class="recommendation_stats">
+                  <div class="recommendation_type_ctn"><span class="color_recommended">推荐</span></div>
+                </div>
+                <div class="recommendation_desc">
+                  在生化2重制版发售一年之后匆匆忙忙推出的赶工作品，场景和剧情大量阉割，过于短促是致命伤，显得非常不耐玩。
+                </div>
+              </div>
+            </a>
+          </div>
+        </div>
+        """
+        parsed = extractor.parse_curator_recommendations(re3_html, curator_name="小黑盒-盒娘后援会", clanid=41542789)
+        self.assertEqual(len(parsed), 1)
+        self.assertEqual(parsed[0]["attitude"], "not_recommended")
+        self.assertEqual(parsed[0]["voted_up"], 0)
+
+        # 3. Markdown output must NOT contain "####" or >1 decimal float percentages, and must show short_desc gameplay hook
+        md = server._markdown(
+            {
+                "8": [
+                    {
+                        "appid": 4096830,
+                        "name": "S.O.N.A.R. - 潜艇菜鸟团",
+                        "is_free": False,
+                        "has_demo": True,
+                        "price_cny": 29.75,
+                        "max_players": 6,
+                        "curator_count": 2,
+                        "curators": ["Steam物理互坑·欢乐联机热榜", "Steam独立整活·最新发售榜"],
+                        "positive_pct": 84.39011138277642,
+                        "schinese_pct": 79.26893562181478,
+                        "total_reviews": 120,
+                        "short_desc": "支持 1–6 人在线合作的混乱潜艇模拟游戏。",
+                        "quotes": [],
+                    }
+                ]
+            },
+            [],
+            4,
+            "any",
+            "under_50",
+        )
+        self.assertNotIn("####", md)
+        self.assertNotIn("84.390111", md)
+        self.assertIn("84.4%", md)
+        self.assertIn("79.3%", md)
+        self.assertIn("混乱潜艇模拟游戏", md)
+
+        # 4. KOOK intent parser: "我们四个人，玩点恐怖的，50以内的和demo都行" should set budget='under_50' and NOT force tag='demo'
+        intent = kook_bot.parse_intent_from_text("@What to play 我们四个人，玩点恐怖的，50以内的和demo都行")
+        self.assertEqual(intent["params"].get("budget"), "under_50")
+        self.assertIsNone(intent["params"].get("tag"))

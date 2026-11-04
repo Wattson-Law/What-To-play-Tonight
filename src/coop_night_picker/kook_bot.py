@@ -27,6 +27,12 @@ _TAG_KEYWORDS = {
     "沙盒": "沙盒",
     "射击": "射击",
     "欢乐": "欢乐",
+    "搞笑": "欢乐",
+    "整活": "欢乐",
+    "妖精": "欢乐",
+    "抽象": "欢乐",
+    "派对": "派对",
+    "物理": "物理",
     "友尽": "欢乐",
 }
 
@@ -75,10 +81,10 @@ def parse_intent_from_text(text: str, defaults: dict[str, Any] | None = None) ->
         params.setdefault("horror", "any")
 
     # Budget
-    if any(w in low for w in ("免费", "白嫖", "demo", "试玩", "0元")):
-        params["budget"] = "free_or_demo"
-    elif any(w in low for w in ("50", "五十", "便宜", "平价")):
+    if any(w in low for w in ("50", "五十", "便宜", "平价")):
         params["budget"] = "under_50"
+    elif any(w in low for w in ("免费", "白嫖", "demo", "试玩", "0元")):
+        params["budget"] = "free_or_demo"
     elif any(w in cleaned for w in ("价格无所谓", "不差钱", "预算不限", "随便", "不限", "都行")):
         params.setdefault("budget", "any")
 
@@ -91,6 +97,8 @@ def parse_intent_from_text(text: str, defaults: dict[str, Any] | None = None) ->
     # Tag
     for kw, canonical in _TAG_KEYWORDS.items():
         if kw in low:
+            if canonical == "demo" and params.get("budget") == "under_50":
+                continue
             params["tag"] = canonical
             break
 

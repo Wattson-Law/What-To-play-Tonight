@@ -7,7 +7,14 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parents[1] / "src"))
 
-from coop_night_picker.constants import CATEGORY_ZH, CURATOR_SOURCES, REVIEW_TIERS, TAG_ZH
+from coop_night_picker.constants import (
+    CATEGORY_ZH,
+    CURATOR_SOURCES,
+    FRIENDSLOP_FEEDS,
+    QUIRKY_TAG_IDS,
+    REVIEW_TIERS,
+    TAG_ZH,
+)
 from coop_night_picker.db import init_db, insert_quote, upsert_game
 from coop_night_picker.extractor import (
     build_avoid_reasons,
@@ -90,7 +97,31 @@ def main(argv=None):
                         if str(key).isdigit() and isinstance(value, dict) and ("data" in value or "success" in value):
                             merged[int(key)] = {"appid": int(key), "appdetails": value}
     else:
-        # 1. Primary source: Human Curator recommendations (Co-op, Online Co-op, Horror Co-op)
+        # 0. Top priority: Automated 4-channel Friendslop / Quirky Co-op & Popular Wishlist feeds
+        for idx, feed in enumerate(FRIENDSLOP_FEEDS, 1):
+            feed_params = {k: v for k, v in feed.items() if k != "name"}
+            for item in _items(client.store_search("", count=min(50, max(30, args.limit)), **feed_params)):
+                aid = int(item["appid"])
+                if aid not in merged:
+                    merged[aid] = dict(item)
+                else:
+                    merged[aid]["tag_ids"] = sorted(set(merged[aid].get("tag_ids", [])) | set(item.get("tag_ids", [])))
+                curator_map.setdefault(aid, []).append(
+                    {
+                        "appid": aid,
+                        "name": item.get("name", ""),
+                        "tag_ids": list(item.get("tag_ids", [])),
+                        "curator_name": feed["name"],
+                        "clanid": 990000 + idx,
+                        "voted_up": 1,
+                        "attitude": "recommended",
+                        "blurb": "",
+                        "quote_text": "",
+                        "review_url": f"https://store.steampowered.com/app/{aid}/",
+                    }
+                )
+
+        # 1. Human Curator recommendations (Co-op, Online Co-op)
         for curator in CURATOR_SOURCES:
             for tag_filter in ("3843", "1685"):
                 raw_cur = client.curator_recommendations(
@@ -123,10 +154,14 @@ def main(argv=None):
                 else:
                     merged[aid]["tag_ids"] = sorted(set(merged[aid].get("tag_ids", [])) | set(item.get("tag_ids", [])))
 
-    # Order candidates so multi-curator Picks come first, followed by remaining items
+    # Order candidates so quirky/Friendslop & multi-curator Picks come first
     ordered_candidates = sorted(
         merged.items(),
-        key=lambda kv: (len({c["curator_name"] for c in curator_map.get(kv[0], []) if c.get("voted_up")}), -kv[0]),
+        key=lambda kv: (
+            len({c["curator_name"] for c in curator_map.get(kv[0], []) if c.get("voted_up")}),
+            int(bool(set(kv[1].get("tag_ids", [])) & QUIRKY_TAG_IDS)),
+            kv[0],
+        ),
         reverse=True,
     ) if not root else list(merged.items())
     selected = ordered_candidates[: args.limit]
@@ -292,6 +327,7 @@ def main(argv=None):
             )
             or game["negative_match_reviews"] >= 3
             or (len(neg_curators) > 0 and len(pos_curators) == 0)
+            or (len(neg_curators) > 0 and not (all_tag_ids & QUIRKY_TAG_IDS))
         )
 
         if not args.dry_run:
@@ -299,7 +335,7 @@ def main(argv=None):
             conn.execute("DELETE FROM game_quotes WHERE appid=?", (appid,))
             conn.commit()
             # Insert curator quotes first so human curator blurbs are always available
-            for ce in c_entries[:3]:
+            for ce in [c for c in c_entries if c.get("quote_text")][:3]:
                 insert_quote(
                     conn,
                     {
