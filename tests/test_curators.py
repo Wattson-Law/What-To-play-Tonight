@@ -229,3 +229,13 @@ class CuratorPipelineTest(unittest.TestCase):
             self.assertIn("开黑选游助手", first)
             second = session.handle_message("chan-1", "4人 恐怖 免费 独立", is_mentioned=False)
             self.assertIn("今晚玩什么 · 筛选结果", second)
+
+    def test_kook_bot_handles_role_mention_and_wan_sha_variant(self):
+        session = kook_bot.KookBotSession(cooldown_sec=0.0)
+        with mock.patch.object(kook_bot, "call_llm_for_params", return_value=None):
+            reply = session.handle_message("chan-role", "(rol)77999772(rol) 今晚玩啥", is_mentioned=False)
+            self.assertIsNotNone(reply)
+            self.assertIn("开黑选游助手", reply)
+            direct = session.handle_message("chan-role2", "(rol)77999772(rol) 推荐4人恐怖独立游戏", is_mentioned=False)
+            self.assertIsNotNone(direct)
+            self.assertIn("今晚玩什么 · 筛选结果", direct)

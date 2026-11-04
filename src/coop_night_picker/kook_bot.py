@@ -1,4 +1,4 @@
-"""KOOK WebSocket Bot integration for coop-night-picker (GitHub Actions & standalone ready)."""
+"""KOOK WebSocket + REST Poller Bot integration for coop-night-picker."""
 from __future__ import annotations
 
 import asyncio
@@ -33,7 +33,7 @@ _TAG_KEYWORDS = {
 
 def parse_intent_from_text(text: str, defaults: dict[str, Any] | None = None) -> dict[str, Any]:
     """Deterministically parse KOOK user message into tool intent & parameters."""
-    cleaned = re.sub(r"\(met\)\d+\(met\)", " ", text or "").strip()
+    cleaned = re.sub(r"\((?:met|rol)\)\d+\((?:met|rol)\)", " ", text or "").strip()
     cleaned = re.sub(r"@\S+", " ", cleaned).strip()
     low = cleaned.lower()
 
@@ -102,9 +102,8 @@ def parse_intent_from_text(text: str, defaults: dict[str, Any] | None = None) ->
     elif any(w in cleaned for w in ("通宵", "不限时", "长期")):
         params["session_duration"] = "long"
 
-    # If user explicitly asked to recommend with at least one specific trait (e.g. "推荐恐怖游戏" or "推荐独立游戏")
     has_specific = any(k in params for k in ("horror", "budget", "tag")) or bool(m_players)
-    if has_specific and ("推荐" in cleaned or "玩什么" in cleaned or defaults is not None):
+    if has_specific and (any(w in cleaned for w in ("推荐", "玩什么", "玩啥", "来个", "有什么")) or defaults is not None):
         params.setdefault("players", 4)
         params.setdefault("horror", "any")
         params.setdefault("budget", "any")
@@ -154,7 +153,7 @@ def call_llm_for_params(user_text: str) -> dict[str, Any] | None:
 class KookBotSession:
     """Stateful KOOK channel coordinator with rate limiting."""
 
-    def __init__(self, cooldown_sec: float = 3.0):
+    def __init__(self, cooldown_sec: float = 1.5):
         self.pending_channels: dict[str, dict[str, Any]] = {}
         self.last_reply_at: dict[str, float] = {}
         self.cooldown_sec = cooldown_sec
@@ -163,7 +162,25 @@ class KookBotSession:
         now = time.time()
         in_pending = channel_id in self.pending_channels
         stripped = (text or "").strip()
-        trigger_words = ("今晚玩什么", "推荐", "有什么好玩", "联机游戏", "/start", "/help", "搜 ", "详情", "玩过", "避雷")
+        if re.search(r"\((?:met|rol)\)\d+\((?:met|rol)\)", stripped):
+            is_mentioned = True
+        trigger_words = (
+            "今晚玩什么",
+            "今晚玩啥",
+            "玩什么",
+            "玩啥",
+            "推荐",
+            "有什么好玩",
+            "联机游戏",
+            "说话",
+            "在吗",
+            "/start",
+            "/help",
+            "搜 ",
+            "详情",
+            "玩过",
+            "避雷",
+        )
         if not is_mentioned and not in_pending and not any(w in stripped for w in trigger_words):
             return None
         if now - self.last_reply_at.get(channel_id, 0.0) < self.cooldown_sec:
@@ -207,7 +224,6 @@ class KookBotSession:
             return f"✅ 已记录 AppID `{intent['appid']}` 为 **{label}**！"
 
         if intent["action"] == "ask":
-            # Try optional LLM extraction if user wrote a free-form sentence
             llm_guess = call_llm_for_params(stripped)
             if isinstance(llm_guess, dict) and any(llm_guess.get(k) for k in ("horror", "budget", "tag", "players")):
                 p = intent["params"]
@@ -237,7 +253,6 @@ class KookBotSession:
                 return "当前筛选条件下暂无匹配游戏，试试放宽条件（例如：`4人 都行 价格无所谓`）！"
             return res["markdown_preview"]
 
-        # Otherwise ask the 1-round 4 questions and remember channel state
         self.pending_channels[channel_id] = intent.get("params") or {}
         self.last_reply_at[channel_id] = now
         return (
@@ -251,7 +266,7 @@ class KookBotSession:
 
 
 async def run_kook_ws(token: str, max_runtime_seconds: int = 19800) -> None:
-    """Connect to KOOK WebSocket gateway and process messages until max_runtime_seconds."""
+    """Connect to KOOK WebSocket gateway AND poll text channels so no message is ever missed."""
     import websockets
 
     headers = {"Authorization": f"Bot {token}"}
@@ -262,61 +277,130 @@ async def run_kook_ws(token: str, max_runtime_seconds: int = 19800) -> None:
             raise RuntimeError(f"KOOK auth failed: code={me_data.get('code')} msg={me_data.get('message')}")
         bot_id = str(me_data["data"]["id"])
         bot_name = me_data["data"].get("username", "Bot")
-        print(f"KOOK bot authenticated: {bot_name} (id={bot_id})")
-
-        gw_resp = await http.get(f"{KOOK_API_BASE}/gateway/index", params={"compress": 0})
-        gw_url = gw_resp.json()["data"]["url"]
+        print(f"KOOK bot authenticated: {bot_name} (id={bot_id})", flush=True)
 
         session = KookBotSession()
+        seen_msg_ids: set[str] = set()
         started_at = time.time()
-        sn = 0
 
-        async with websockets.connect(gw_url, ping_interval=None) as ws:
-            async def heartbeat():
-                while time.time() - started_at < max_runtime_seconds:
-                    await asyncio.sleep(26)
-                    await ws.send(json.dumps({"s": 2, "sn": sn}))
+        # Discover text channels and snapshot existing message IDs on startup
+        text_channels: list[str] = []
+        try:
+            g_resp = await http.get(f"{KOOK_API_BASE}/guild/list")
+            for g in g_resp.json().get("data", {}).get("items", []):
+                c_resp = await http.get(f"{KOOK_API_BASE}/channel/list", params={"guild_id": g["id"]})
+                for ch in c_resp.json().get("data", {}).get("items", []):
+                    if ch.get("type") == 1:
+                        cid = str(ch["id"])
+                        text_channels.append(cid)
+                        # Pre-warm pending state on default channels so direct follow-up replies work immediately
+                        session.pending_channels.setdefault(cid, {})
+                        m_resp = await http.get(f"{KOOK_API_BASE}/message/list", params={"target_id": cid, "page_size": 20})
+                        for m in m_resp.json().get("data", {}).get("items", []):
+                            if m.get("id"):
+                                seen_msg_ids.add(str(m["id"]))
+        except Exception as exc:
+            print(f"Channel discovery warning: {exc}", flush=True)
 
-            hb_task = asyncio.create_task(heartbeat())
-            try:
-                while time.time() - started_at < max_runtime_seconds:
+        async def process_incoming(channel_id: str, msg_id: str, author_id: str, is_bot: bool, content: str, is_mentioned: bool, is_dm: bool = False):
+            if not msg_id or msg_id in seen_msg_ids:
+                return
+            seen_msg_ids.add(msg_id)
+            if is_bot or str(author_id) == bot_id:
+                return
+            reply = session.handle_message(channel_id, content, is_mentioned=is_mentioned)
+            if reply:
+                endpoint = f"{KOOK_API_BASE}/direct-message/create" if is_dm else f"{KOOK_API_BASE}/message/create"
+                payload = {"type": 9, "target_id": channel_id, "content": reply, "quote": msg_id}
+                await http.post(endpoint, json=payload)
+                print(f"Replied to msg_id={msg_id} in channel={channel_id}", flush=True)
+
+        async def poll_channels():
+            while time.time() - started_at < max_runtime_seconds:
+                await asyncio.sleep(2.5)
+                for cid in list(text_channels):
                     try:
-                        raw = await asyncio.wait_for(ws.recv(), timeout=35.0)
-                    except asyncio.TimeoutError:
-                        continue
-                    packet = json.loads(raw)
-                    s_code = packet.get("s")
-                    if s_code == 0:
-                        sn = max(sn, int(packet.get("sn") or 0))
-                        d = packet.get("d") or {}
-                        if d.get("channel_type") not in {"GROUP", "PERSON"}:
-                            continue
-                        if str(d.get("author_id")) == bot_id or (d.get("extra", {}).get("author", {}).get("bot")):
-                            continue
-                        content = str(d.get("content") or "")
-                        channel_id = str(d.get("target_id") or "")
-                        mentions = [str(x) for x in (d.get("extra", {}).get("mention") or [])]
-                        is_mentioned = (
-                            d.get("channel_type") == "PERSON"
-                            or bot_id in mentions
-                            or f"(met){bot_id}(met)" in content
-                        )
-                        reply = session.handle_message(channel_id, content, is_mentioned=is_mentioned)
-                        if reply:
-                            endpoint = (
-                                f"{KOOK_API_BASE}/direct-message/create"
-                                if d.get("channel_type") == "PERSON"
-                                else f"{KOOK_API_BASE}/message/create"
+                        m_resp = await http.get(f"{KOOK_API_BASE}/message/list", params={"target_id": cid, "page_size": 10})
+                        items = m_resp.json().get("data", {}).get("items", [])
+                        for m in items[-5:]:
+                            mid = str(m.get("id") or "")
+                            if not mid or mid in seen_msg_ids:
+                                continue
+                            if m.get("type") not in {1, 9, 10}:
+                                seen_msg_ids.add(mid)
+                                continue
+                            author = m.get("author") or {}
+                            content = str(m.get("content") or "")
+                            mentions = [str(x) for x in (m.get("mention") or [])]
+                            mention_roles = [str(x) for x in (m.get("mention_roles") or [])]
+                            is_mentioned = (
+                                bot_id in mentions
+                                or bool(mention_roles)
+                                or f"(met){bot_id}(met)" in content
+                                or "(rol)" in content
                             )
-                            payload = {
-                                "type": 9,
-                                "target_id": channel_id,
-                                "content": reply,
-                                "quote": d.get("msg_id"),
-                            }
-                            await http.post(endpoint, json=payload)
-            finally:
-                hb_task.cancel()
+                            await process_incoming(
+                                channel_id=cid,
+                                msg_id=mid,
+                                author_id=str(author.get("id") or ""),
+                                is_bot=bool(author.get("bot")),
+                                content=content,
+                                is_mentioned=is_mentioned,
+                                is_dm=False,
+                            )
+                    except Exception:
+                        pass
+
+        poll_task = asyncio.create_task(poll_channels())
+        try:
+            gw_resp = await http.get(f"{KOOK_API_BASE}/gateway/index", params={"compress": 0})
+            gw_url = gw_resp.json()["data"]["url"]
+            sn = 0
+            async with websockets.connect(gw_url, ping_interval=None) as ws:
+                async def heartbeat():
+                    while time.time() - started_at < max_runtime_seconds:
+                        await asyncio.sleep(26)
+                        await ws.send(json.dumps({"s": 2, "sn": sn}))
+
+                hb_task = asyncio.create_task(heartbeat())
+                try:
+                    while time.time() - started_at < max_runtime_seconds:
+                        try:
+                            raw = await asyncio.wait_for(ws.recv(), timeout=35.0)
+                        except asyncio.TimeoutError:
+                            continue
+                        packet = json.loads(raw)
+                        if packet.get("s") == 0:
+                            sn = max(sn, int(packet.get("sn") or 0))
+                            d = packet.get("d") or {}
+                            if d.get("type") == 255 or d.get("channel_type") not in {"GROUP", "PERSON"}:
+                                continue
+                            extra_author = d.get("extra", {}).get("author", {}) or {}
+                            content = str(d.get("content") or "")
+                            channel_id = str(d.get("target_id") or "")
+                            mentions = [str(x) for x in (d.get("extra", {}).get("mention") or [])]
+                            mention_roles = [str(x) for x in (d.get("extra", {}).get("mention_roles") or [])]
+                            is_dm = d.get("channel_type") == "PERSON"
+                            is_mentioned = (
+                                is_dm
+                                or bot_id in mentions
+                                or bool(mention_roles)
+                                or f"(met){bot_id}(met)" in content
+                                or "(rol)" in content
+                            )
+                            await process_incoming(
+                                channel_id=channel_id,
+                                msg_id=str(d.get("msg_id") or ""),
+                                author_id=str(d.get("author_id") or ""),
+                                is_bot=bool(extra_author.get("bot")),
+                                content=content,
+                                is_mentioned=is_mentioned,
+                                is_dm=is_dm,
+                            )
+                finally:
+                    hb_task.cancel()
+        finally:
+            poll_task.cancel()
 
 
 def main() -> None:
