@@ -168,7 +168,8 @@ def recommend_games(conn, *, horror="any", budget="any", players=None, mode="onl
     if budget == "free_or_demo":
         sql += " AND (is_free=1 OR has_demo=1)"
     elif budget == "under_50":
-        sql += " AND ((price_cny IS NOT NULL AND price_cny<50) OR is_free=1 OR has_demo=1)"
+        # paid under 50, free games, and unreleased/免费试玩 titles (price unknown)
+        sql += " AND ((price_cny IS NOT NULL AND price_cny<50) OR is_free=1 OR (has_demo=1 AND (price_cny IS NULL OR price_cny=0)))"
     elif budget == "any_paid":
         sql += " AND is_free=0"
     if players:

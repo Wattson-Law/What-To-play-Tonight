@@ -13,6 +13,33 @@ import httpx
 from . import server
 
 KOOK_API_BASE = "https://www.kookapp.cn/api/v3"
+KOOK_CONTENT_LIMIT = 1800
+
+
+def split_reply_chunks(text: str, limit: int = KOOK_CONTENT_LIMIT) -> list[str]:
+    """Split a long KMarkdown reply into sendable chunks, preferring line boundaries."""
+    text = (text or "").strip()
+    if not text:
+        return []
+    if len(text) <= limit:
+        return [text]
+    chunks: list[str] = []
+    current = ""
+    for line in text.split("\n"):
+        candidate = f"{current}\n{line}" if current else line
+        if len(candidate) <= limit:
+            current = candidate
+            continue
+        if current:
+            chunks.append(current)
+            current = ""
+        while len(line) > limit:
+            chunks.append(line[:limit])
+            line = line[limit:]
+        current = line
+    if current:
+        chunks.append(current)
+    return chunks
 
 _TAG_KEYWORDS = {
     "独立": "独立",
@@ -60,15 +87,21 @@ def parse_intent_from_text(text: str, defaults: dict[str, Any] | None = None) ->
     params: dict[str, Any] = dict(defaults or {})
 
     # Players
+    _cn_num = {"二": 2, "两": 2, "三": 3, "四": 4, "五": 5, "六": 6, "七": 7, "八": 8}
     m_players = re.search(r"(\d{1,2})\s*(?:个?人|p|players?)", low)
+    m_players_cn = re.search(r"([二两三四五六七八])\s*个?人", cleaned)
     if m_players:
         params["players"] = max(2, min(16, int(m_players.group(1))))
+    elif m_players_cn:
+        params["players"] = _cn_num[m_players_cn.group(1)]
     elif "双人" in cleaned or "两人" in cleaned or "情侣" in cleaned:
         params["players"] = 2
     elif "三人" in cleaned:
         params["players"] = 3
     elif "四人" in cleaned or "开黑" in cleaned:
         params.setdefault("players", 4)
+    elif "五人以上" in cleaned or "五个人以上" in cleaned:
+        params.setdefault("players", 5)
 
     # Horror
     if any(w in cleaned for w in ("不恐怖", "不要恐怖", "别恐怖", "胆小", "一点都不行", "非恐怖")):
@@ -191,7 +224,8 @@ class KookBotSession:
         )
         if not is_mentioned and not in_pending and not any(w in stripped for w in trigger_words):
             return None
-        if now - self.last_reply_at.get(channel_id, 0.0) < self.cooldown_sec:
+        # Cooldown only guards unsolicited spam; while a dialog is open the user is answering us.
+        if not in_pending and now - self.last_reply_at.get(channel_id, 0.0) < self.cooldown_sec:
             return None
 
         prior = self.pending_channels.get(channel_id)
@@ -206,7 +240,7 @@ class KookBotSession:
             q_line = f"\n> {quotes[0]['quote_text']}" if quotes else ""
             price_str = "免费" if card["is_free"] else f"¥{card['price_cny']}"
             return (
-                f"### 🎮 《{card['name']}》（AppID: `{card['appid']}`）\n"
+                f"**🎮 《{card['name']}》**（AppID: `{card['appid']}`）\n"
                 f"- **评价**：{card['stars']} {card['review_tier']}（全语言 {card['positive_pct']}%｜简中 {card.get('schinese_pct') or '—'}%）\n"
                 f"- **价格**：{price_str}｜**支持人数**：{card.get('max_players') or '?'}人\n"
                 f"- **鉴赏家背书**：{card.get('curator_count', 0)} 位（{'、'.join(card.get('curators') or []) or '无'}）"
@@ -263,14 +297,19 @@ class KookBotSession:
 
         self.pending_channels[channel_id] = intent.get("params") or {}
         self.last_reply_at[channel_id] = now
-        return (
-            "🎮 **今晚玩什么 · 开黑选游助手**\n"
-            "请直接回复一句你的条件（不用再次@我），例如：`4人 不恐怖 免费 独立` 或 `2人 微恐 50以内`：\n"
-            "1. **人数**：2人 / 3-4人 / 5人以上\n"
-            "2. **恐怖接受度**：不恐怖 / 微恐 / 越吓人越好 / 都行\n"
-            "3. **预算**：免费或Demo / 50元以内 / 价格不限\n"
-            "4. **偏好标签（可选）**：独立 / Demo试玩 / 生存 / 解谜 / 肉鸽 / 沙盒 / 欢乐"
-        )
+        params = intent.get("params") or {}
+        missing: list[str] = []
+        if not params.get("players"):
+            missing.append("**人数**：2人 / 3-4人 / 5人以上")
+        if not params.get("horror"):
+            missing.append("**恐怖接受度**：不恐怖 / 微恐 / 越吓人越好 / 都行")
+        if not params.get("budget"):
+            missing.append("**预算**：免费或Demo / 50元以内 / 价格不限")
+        if not missing:
+            missing.append("**偏好标签（可选）**：独立 / Demo / 生存 / 解谜 / 肉鸽 / 沙盒 / 欢乐")
+        header = "🎮 **今晚玩什么 · 还差一点信息**" if in_pending else "🎮 **今晚玩什么 · 开黑选游助手**"
+        numbered = "\n".join(f"{i}. {item}" for i, item in enumerate(missing, 1))
+        return f"{header}\n直接回一句就行（不用再次@我），例如 `4人 不恐怖 50以内`：\n{numbered}"
 
 
 async def run_kook_ws(token: str, max_runtime_seconds: int = 19800) -> None:
@@ -290,6 +329,7 @@ async def run_kook_ws(token: str, max_runtime_seconds: int = 19800) -> None:
         session = KookBotSession()
         seen_msg_ids: set[str] = set()
         started_at = time.time()
+        max_message_age_seconds = int(os.getenv("KOOK_MAX_MESSAGE_AGE_SECONDS", "900"))
 
         # Discover text channels and snapshot existing message IDs on startup
         text_channels: list[str] = []
@@ -310,18 +350,43 @@ async def run_kook_ws(token: str, max_runtime_seconds: int = 19800) -> None:
         except Exception as exc:
             print(f"Channel discovery warning: {exc}", flush=True)
 
-        async def process_incoming(channel_id: str, msg_id: str, author_id: str, is_bot: bool, content: str, is_mentioned: bool, is_dm: bool = False):
+        async def process_incoming(channel_id: str, msg_id: str, author_id: str, is_bot: bool, content: str, is_mentioned: bool, is_dm: bool = False, created_ms=None):
             if not msg_id or msg_id in seen_msg_ids:
                 return
             seen_msg_ids.add(msg_id)
             if is_bot or str(author_id) == bot_id:
                 return
+            if created_ms and max_message_age_seconds > 0:
+                try:
+                    age = time.time() - float(created_ms) / 1000.0
+                except (TypeError, ValueError):
+                    age = 0.0
+                if age > max_message_age_seconds:
+                    print(f"Skip stale msg_id={msg_id} age={age:.0f}s", flush=True)
+                    return
             reply = session.handle_message(channel_id, content, is_mentioned=is_mentioned)
-            if reply:
-                endpoint = f"{KOOK_API_BASE}/direct-message/create" if is_dm else f"{KOOK_API_BASE}/message/create"
-                payload = {"type": 9, "target_id": channel_id, "content": reply, "quote": msg_id}
-                await http.post(endpoint, json=payload)
-                print(f"Replied to msg_id={msg_id} in channel={channel_id}", flush=True)
+            if not reply:
+                return
+            endpoint = f"{KOOK_API_BASE}/direct-message/create" if is_dm else f"{KOOK_API_BASE}/message/create"
+            chunks = split_reply_chunks(reply)
+            for index, chunk in enumerate(chunks, 1):
+                payload = {"type": 9, "target_id": channel_id, "content": chunk}
+                if index == 1:
+                    payload["quote"] = msg_id
+                try:
+                    resp = await http.post(endpoint, json=payload)
+                    try:
+                        body = resp.json()
+                    except Exception:
+                        body = {}
+                    code = body.get("code")
+                    print(
+                        f"Reply {index}/{len(chunks)} msg_id={msg_id} channel={channel_id} "
+                        f"http={resp.status_code} code={code} msg={body.get('message', '')} len={len(chunk)}",
+                        flush=True,
+                    )
+                except Exception as exc:
+                    print(f"Reply failed {index}/{len(chunks)} msg_id={msg_id}: {exc}", flush=True)
 
         async def poll_channels():
             while time.time() - started_at < max_runtime_seconds:
@@ -355,6 +420,7 @@ async def run_kook_ws(token: str, max_runtime_seconds: int = 19800) -> None:
                                 content=content,
                                 is_mentioned=is_mentioned,
                                 is_dm=False,
+                                created_ms=m.get("create_time"),
                             )
                     except Exception:
                         pass
@@ -404,6 +470,7 @@ async def run_kook_ws(token: str, max_runtime_seconds: int = 19800) -> None:
                                 content=content,
                                 is_mentioned=is_mentioned,
                                 is_dm=is_dm,
+                                created_ms=d.get("msg_timestamp"),
                             )
                 finally:
                     hb_task.cancel()

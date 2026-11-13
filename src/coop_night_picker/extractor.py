@@ -105,6 +105,10 @@ def parse_curator_recommendations(payload_or_html, curator_name: str = "Steam鉴
 
         desc_el = rec.select_one(".recommendation_desc")
         blurb = re.sub(r"\s+", " ", desc_el.get_text(" ", strip=True)) if desc_el else ""
+        # Strip curator self-promo noise (activation-code giveaways, follow-me lines) from the blurb.
+        blurb = re.sub(r"每日福利游戏激活码[：:]\s*[A-Za-z0-9\-]+", "", blurb or "")
+        blurb = re.sub(r"(求关注|点个关注|欢迎关注|记得关注)[~～!！。\s]*", "", blurb)
+        blurb = re.sub(r"^[\s、，,。:：\-]+|[\s、，,。:：\-]+$", "", blurb).strip()
         if blurb and re.search(NEGATIVE_CURATOR_PATTERNS, blurb, re.I):
             attitude = "not_recommended"
             voted_up = 0

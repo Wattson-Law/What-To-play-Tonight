@@ -8,16 +8,19 @@ on:
         required: false
         default: "5"
   schedule:
-    # Automatically start every day at 19:00 Beijing Time (11:00 UTC) for the evening game session
-    - cron: "0 11 * * *"
+    # Fire every hour. Each run lasts ~5h17m; with the queueing concurrency group
+    # below, the next pending run starts immediately after the current one ends,
+    # so the bot stays online 24/7 even when GitHub delays scheduled triggers.
+    - cron: "0 * * * *"
 
 permissions:
   contents: read
   models: read
 
 concurrency:
+  # Queue instead of cancel: killing the in-flight run would take the bot offline.
   group: kook-bot-runner
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   kook-bot:
@@ -30,6 +33,10 @@ jobs:
           python-version: "3.12"
       - name: Install dependencies
         run: python -m pip install -e .
+      - name: Show startup context
+        run: |
+          python -c "import datetime;print('start UTC', datetime.datetime.utcnow().isoformat())"
+          git log --oneline -1
       - name: Run KOOK Bot
         env:
           KOOK_TOKEN: ${{ secrets.KOOK_TOKEN }}
@@ -38,4 +45,5 @@ jobs:
           LLM_BASE_URL: ${{ secrets.LLM_BASE_URL }}
           LLM_MODEL: ${{ secrets.LLM_MODEL }}
           KOOK_MAX_RUNTIME_SECONDS: "19000"
+          KOOK_MAX_MESSAGE_AGE_SECONDS: "900"
         run: python scripts/run_kook_bot.py

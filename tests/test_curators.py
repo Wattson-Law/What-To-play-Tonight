@@ -311,3 +311,28 @@ class CuratorPipelineTest(unittest.TestCase):
         intent = kook_bot.parse_intent_from_text("@What to play 我们四个人，玩点恐怖的，50以内的和demo都行")
         self.assertEqual(intent["params"].get("budget"), "under_50")
         self.assertIsNone(intent["params"].get("tag"))
+
+    def test_reply_chunking_and_kook_safe_headings(self):
+        # Long replies must be split under KOOK's content limit, keeping every line intact.
+        long_text = "\n".join(f"- line {i} " + "x" * 60 for i in range(80))
+        chunks = kook_bot.split_reply_chunks(long_text)
+        self.assertGreater(len(chunks), 1)
+        self.assertTrue(all(len(c) <= kook_bot.KOOK_CONTENT_LIMIT for c in chunks))
+        self.assertEqual("\n".join(chunks), long_text)
+        self.assertEqual(kook_bot.split_reply_chunks("short reply"), ["short reply"])
+        self.assertEqual(kook_bot.split_reply_chunks("   "), [])
+
+        # A single line longer than the limit is hard-split, never dropped.
+        huge_line = "y" * (kook_bot.KOOK_CONTENT_LIMIT * 2 + 7)
+        huge_chunks = kook_bot.split_reply_chunks(huge_line)
+        self.assertEqual("".join(huge_chunks), huge_line)
+        self.assertTrue(all(len(c) <= kook_bot.KOOK_CONTENT_LIMIT for c in huge_chunks))
+
+        # Markdown headings KOOK cannot render must not appear anywhere.
+        md = server._markdown(
+            {"9": [{"appid": 1, "name": "Test Game", "is_free": True, "has_demo": False, "max_players": 4,
+                    "positive_pct": 97.5, "total_reviews": 10, "quotes": []}]},
+            [], 4, "any", "any",
+        )
+        self.assertNotIn("###", md)
+        self.assertIn("97.5%", md)

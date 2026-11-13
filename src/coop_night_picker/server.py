@@ -198,7 +198,7 @@ def _format_game(game, conn=None):
 def _markdown(groups, avoid, players, horror, budget, mode="online", tag=None):
     mode_label = {"online": "online", "local": "local/co-op", "any": "online/local"}.get(mode, mode)
     tag_suffix = f"｜{tag}" if tag else ""
-    title = f"### 🎮 今晚玩什么 · 筛选结果（{players}人｜{horror}｜{budget}｜{mode_label}{tag_suffix}）"
+    title = f"**🎮 今晚玩什么 · 筛选结果**（{players}人｜{horror}｜{budget}｜{mode_label}{tag_suffix}）"
     lines = [title, ""]
     for score, games in groups.items():
         tier = REVIEW_TIERS[int(score)]
