@@ -1,6 +1,12 @@
 name: Run KOOK Game Night Bot
 
 on:
+  push:
+    branches: [main]
+    paths:
+      - "src/coop_night_picker/**"
+      - "scripts/run_kook_bot.py"
+      - ".github/workflows/kook_bot.yml"
   workflow_dispatch:
     inputs:
       runtime_hours:
