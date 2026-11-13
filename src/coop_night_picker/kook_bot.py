@@ -143,8 +143,10 @@ def parse_intent_from_text(text: str, defaults: dict[str, Any] | None = None) ->
     elif any(w in cleaned for w in ("通宵", "不限时", "长期")):
         params["session_duration"] = "long"
 
-    has_specific = any(k in params for k in ("horror", "budget", "tag")) or bool(m_players)
-    if has_specific and (any(w in cleaned for w in ("推荐", "玩什么", "玩啥", "来个", "有什么")) or defaults is not None):
+    core_filled = sum(1 for key in ("players", "horror", "budget") if params.get(key) not in (None, ""))
+    has_trigger = any(w in cleaned for w in ("推荐", "玩什么", "玩啥", "来个", "有什么"))
+    enough = core_filled >= 2 and (has_trigger or m_players or defaults is not None or core_filled >= 3)
+    if enough or (has_trigger and params.get("tag")):
         params.setdefault("players", 4)
         params.setdefault("horror", "any")
         params.setdefault("budget", "any")
