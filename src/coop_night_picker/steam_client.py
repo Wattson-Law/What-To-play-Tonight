@@ -27,7 +27,7 @@ class SteamClient:
         self.transport = transport
         self._last = 0.0
 
-    def _request(self, path, **params):
+    def _request(self, path, cookies=None, **params):
         cp = self.cache / (hashlib.sha256((path + json.dumps(params, sort_keys=True)).encode()).hexdigest() + ".json")
         if cp.exists():
             x = json.loads(cp.read_text(encoding="utf8"))
@@ -44,6 +44,7 @@ class SteamClient:
                         follow_redirects=False,
                         timeout=20,
                         headers={"User-Agent": "Mozilla/5.0"},
+                        cookies=cookies,
                         transport=self.transport,
                     ) as c:
                         r = c.get(host.rstrip("/") + "/" + path.lstrip("/"), params=params)
@@ -76,7 +77,8 @@ class SteamClient:
     search_results = store_search
 
     def store_page(self, appid):
-        return self._request(f"app/{appid}/", l="schinese", cc="cn")
+        age_cookies = {"birthtime": "568022401", "wants_mature_content": "1", "lastagecheckage": "1-0-1988"}
+        return self._request(f"app/{appid}/", cookies=age_cookies, l="schinese", cc="cn")
 
     def appreviews(self, appid, review_type=None, playtime_filter_min=1):
         p = {

@@ -36,7 +36,8 @@ SCHEMA = """CREATE TABLE IF NOT EXISTS games (
     header_image TEXT,
     updated_at TEXT,
     curator_count INTEGER DEFAULT 0,
-    curators_json TEXT
+    curators_json TEXT,
+    coming_soon INTEGER DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS game_quotes (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -74,6 +75,8 @@ def init_db(conn_or_path):
         c.execute("ALTER TABLE games ADD COLUMN curator_count INTEGER DEFAULT 0")
     if "curators_json" not in existing_cols:
         c.execute("ALTER TABLE games ADD COLUMN curators_json TEXT")
+    if "coming_soon" not in existing_cols:
+        c.execute("ALTER TABLE games ADD COLUMN coming_soon INTEGER DEFAULT 0")
     c.commit()
     return c
 
@@ -159,8 +162,34 @@ def _matches_tag(row_dict: dict, tag: str | None) -> bool:
     return any(t in item or item in t for t in targets for item in haystack if item)
 
 
+PLAYABLE_SQL = (
+    "(COALESCE(coming_soon, 0)=0 OR is_free=1 OR has_demo=1)"
+    " AND NOT ("
+    "COALESCE(is_free, 0)=0"
+    " AND COALESCE(has_demo, 0)=0"
+    " AND (price_cny IS NULL OR price_cny<=0)"
+    " AND COALESCE(review_score, 0)=0"
+    " AND COALESCE(total_reviews, 0)=0"
+    ")"
+)
+
+
+def is_playable_game(game: dict) -> bool:
+    """Return True only if the game can actually be downloaded/played tonight (released, free, or has Demo)."""
+    is_free = bool(game.get("is_free"))
+    has_demo = bool(game.get("has_demo")) or str(game.get("type", "")).lower() == "demo"
+    if is_free or has_demo:
+        return True
+    if game.get("coming_soon"):
+        return False
+    price = game.get("price_cny")
+    has_price = price is not None and float(price) > 0
+    has_reviews = int(game.get("review_score") or 0) > 0 or int(game.get("total_reviews") or 0) > 0
+    return has_price or has_reviews
+
+
 def recommend_games(conn, *, horror="any", budget="any", players=None, mode="online", tag=None, limit=50):
-    sql = "SELECT * FROM games WHERE is_avoid=0"
+    sql = f"SELECT * FROM games WHERE is_avoid=0 AND {PLAYABLE_SQL}"
     args = []
     if horror in {"none", "mild", "scary"}:
         sql += " AND horror_level=?"
@@ -168,8 +197,8 @@ def recommend_games(conn, *, horror="any", budget="any", players=None, mode="onl
     if budget == "free_or_demo":
         sql += " AND (is_free=1 OR has_demo=1)"
     elif budget == "under_50":
-        # paid under 50, free games, and unreleased/免费试玩 titles (price unknown)
-        sql += " AND ((price_cny IS NOT NULL AND price_cny<50) OR is_free=1 OR (has_demo=1 AND (price_cny IS NULL OR price_cny=0)))"
+        # paid under 50, free games, or downloadable free demos (never unreleased no-demo games)
+        sql += " AND (is_free=1 OR (price_cny IS NOT NULL AND price_cny>0 AND price_cny<50) OR (has_demo=1 AND (price_cny IS NULL OR price_cny<=0)))"
     elif budget == "any_paid":
         sql += " AND is_free=0"
     if players:
@@ -192,4 +221,4 @@ def recommend_games(conn, *, horror="any", budget="any", players=None, mode="onl
 
 
 def get_avoid_list(conn, limit=20):
-    return [_decode(r) for r in conn.execute("SELECT * FROM games WHERE is_avoid=1 ORDER BY review_score ASC LIMIT ?", (limit,))]
+    return [_decode(r) for r in conn.execute(f"SELECT * FROM games WHERE is_avoid=1 AND {PLAYABLE_SQL} ORDER BY review_score ASC LIMIT ?", (limit,))]

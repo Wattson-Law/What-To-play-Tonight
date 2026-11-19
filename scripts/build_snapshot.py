@@ -15,7 +15,7 @@ from coop_night_picker.constants import (
     REVIEW_TIERS,
     TAG_ZH,
 )
-from coop_night_picker.db import init_db, insert_quote, upsert_game
+from coop_night_picker.db import init_db, insert_quote, is_playable_game, upsert_game
 from coop_night_picker.extractor import (
     build_avoid_reasons,
     derive_review_summary,
@@ -164,7 +164,9 @@ def main(argv=None):
         ),
         reverse=True,
     ) if not root else list(merged.items())
-    selected = ordered_candidates[: args.limit]
+    # Inspect beyond args.limit so skipping unplayable coming-soon titles still fills the snapshot.
+    candidate_pool = ordered_candidates[: max(args.limit * 2, args.limit + 60)] if not root else ordered_candidates[: args.limit]
+    kept_ids: list[int] = []
 
     def fixture(appid, kind):
         if not root:
@@ -180,7 +182,9 @@ def main(argv=None):
                 return path.read_text(encoding="utf8")
         return None
 
-    for appid, seed in selected:
+    for appid, seed in candidate_pool:
+        if len(kept_ids) >= args.limit:
+            break
         game = dict(seed.get("game", seed))
         game["appid"] = appid
         seed_tag_ids = set(seed.get("tag_ids", []))
@@ -212,6 +216,10 @@ def main(argv=None):
             or bool(game.get("fullgame_appid"))
         )
 
+        # Skip unreleased games that have neither a free release nor a downloadable demo
+        if game.get("coming_soon") and not game.get("is_free") and not game["has_demo"]:
+            continue
+
         store_raw = fixture(appid, "store") or fixture(appid, "store_page")
         page = parse_store_page(store_raw or (client.store_page(appid) if not root else ""))
         tags = page["tags"]
@@ -241,8 +249,15 @@ def main(argv=None):
         category_names = set(game.get("categories_json") or [])
         category_names.update(CATEGORY_ZH[category_id] for category_id in category_ids if category_id in CATEGORY_ZH)
         game["categories_json"] = sorted(category_names)
+        explicit_single_only = (
+            bool(category_ids)
+            and (2 in category_ids)
+            and not ({1, 9, 20, 27, 36, 38, 44, 47, 48, 49} & category_ids)
+            and not ({1685, 3843, 4508} & all_tag_ids)
+        )
         game["online_coop"] = int(
-            bool({9, 38} & category_ids or {1685, 3843, 4508} & all_tag_ids or "在线合作" in category_names or c_entries)
+            not explicit_single_only
+            and bool({9, 38} & category_ids or {1685, 3843, 4508} & all_tag_ids or "在线合作" in category_names or c_entries)
         )
         game["local_coop"] = int(
             bool(
@@ -285,6 +300,10 @@ def main(argv=None):
         game["schinese_score"] = schinese_summary.get("score")
         game["review_tier_zh"] = REVIEW_TIERS.get(game["review_score"], REVIEW_TIERS[0])["zh"]
 
+        # Final playability check: exclude titles that cannot be downloaded/played tonight
+        if not is_playable_game(game):
+            continue
+
         positive_reviews = []
         negative_reviews = []
         if args.with_reviews:
@@ -307,6 +326,16 @@ def main(argv=None):
         avoid_reasons = build_avoid_reasons(negative_reviews)
         for nc in neg_curators:
             avoid_reasons.append(f"鉴赏家避雷({nc})")
+        schinese_gap = (
+            game.get("schinese_pct") is not None
+            and game.get("positive_pct") is not None
+            and (game.get("schinese_total") is None or int(game["schinese_total"]) >= 10)
+            and (float(game["positive_pct"]) - float(game["schinese_pct"]) >= 15.0)
+        )
+        if schinese_gap:
+            avoid_reasons.append(
+                f"简中好评率偏低({float(game['schinese_pct']):.0f}% vs 全语言{float(game['positive_pct']):.0f}%)"
+            )
         game["avoid_reasons_json"] = avoid_reasons
         game["negative_match_reviews"] = sum(
             1
@@ -318,24 +347,34 @@ def main(argv=None):
             )
         )
         score = game["review_score"]
+        human_pos_curators = [c for c in pos_curators if not str(c).startswith("Steam")]
         game["is_avoid"] = int(
             (1 <= score <= 5)
-            or (
-                game.get("schinese_pct") is not None
-                and game.get("positive_pct") is not None
-                and game["positive_pct"] - game["schinese_pct"] >= 15
-            )
+            or schinese_gap
             or game["negative_match_reviews"] >= 3
             or (len(neg_curators) > 0 and len(pos_curators) == 0)
-            or (len(neg_curators) > 0 and not (all_tag_ids & QUIRKY_TAG_IDS))
+            or (len(neg_curators) > 0 and len(neg_curators) >= len(human_pos_curators) and not (all_tag_ids & QUIRKY_TAG_IDS))
         )
 
+        kept_ids.append(appid)
         if not args.dry_run:
             upsert_game(conn, game)
             conn.execute("DELETE FROM game_quotes WHERE appid=?", (appid,))
             conn.commit()
-            # Insert curator quotes first so human curator blurbs are always available
-            for ce in [c for c in c_entries if c.get("quote_text")][:3]:
+            # Deduplicate curator quotes and preserve both positive and negative curator blurbs
+            seen_quotes: set[str] = set()
+            pos_curator_quotes: list[dict] = []
+            neg_curator_quotes: list[dict] = []
+            for ce in c_entries:
+                q_text = (ce.get("quote_text") or "").strip()
+                if not q_text or q_text in seen_quotes:
+                    continue
+                seen_quotes.add(q_text)
+                if ce.get("voted_up", 1):
+                    pos_curator_quotes.append(ce)
+                else:
+                    neg_curator_quotes.append(ce)
+            for ce in pos_curator_quotes[:2] + neg_curator_quotes[:1]:
                 insert_quote(
                     conn,
                     {
@@ -358,14 +397,13 @@ def main(argv=None):
                         quote["appid"] = appid
                         insert_quote(conn, quote)
 
-    if not args.dry_run and selected:
-        placeholders = ",".join("?" for _ in selected)
-        active_ids = [appid for appid, _ in selected]
-        conn.execute(f"DELETE FROM game_quotes WHERE appid NOT IN ({placeholders})", active_ids)
-        conn.execute(f"DELETE FROM games WHERE appid NOT IN ({placeholders})", active_ids)
+    if not args.dry_run and kept_ids:
+        placeholders = ",".join("?" for _ in kept_ids)
+        conn.execute(f"DELETE FROM game_quotes WHERE appid NOT IN ({placeholders})", kept_ids)
+        conn.execute(f"DELETE FROM games WHERE appid NOT IN ({placeholders})", kept_ids)
         conn.commit()
 
-    processed = len(selected)
+    processed = len(kept_ids)
     conn.close()
     print(f"processed {processed} games; db={args.db}; dry_run={args.dry_run}")
     return 0

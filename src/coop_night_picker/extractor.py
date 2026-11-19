@@ -14,23 +14,33 @@ except ImportError:
     BeautifulSoup = None
 
 _CN_NUM = {"双": 2, "两": 2, "二": 2, "三": 3, "四": 4, "五": 5, "六": 6, "八": 8, "十": 10}
+_NEGATED_PRAISE_RE = re.compile(
+    r"(?:不会|绝不|毫不|并不|没让|从未|不至于|无需|没有|并非|绝非|不算)"
+    r"(?:让你|让人|令我|令人|显得)?(?:失望|敷衍|半成品|粗制滥造|差评|坐牢|赶工|骗钱|不耐玩)"
+)
 
 
 def infer_max_players(text: str | None, categories: list[str] | None = None, tags: list[str] | None = None) -> int | None:
     blob = " ".join(filter(None, [text or "", " ".join(categories or []), " ".join(tags or [])]))
     if not blob:
         return None
+    # Strip perspective phrases like "第一人称 / 第三人称" so "三人" isn't misread as 3 players.
+    cleaned_blob = re.sub(r"第[一二三四]人称", " ", blob)
     for pat in (
         r"(?:1|2|3|4)\s*[-~至到]\s*(\d{1,2})\s*(?:人|名玩家|players?)",
         r"(?:最多|至多|上限|支持|up\s+to)\s*(\d{1,2})\s*(?:人|名玩家|players?)",
         r"(\d{1,2})\s*(?:人|players?)\s*(?:在线|本地|同屏|联机|合作|开黑|co-?op)",
     ):
-        m = re.search(pat, blob, re.I)
+        m = re.search(pat, cleaned_blob, re.I)
         if m:
             n = int(m.group(1))
             if 2 <= n <= 64:
                 return n
-    m_cn = re.search(r"([双两二三四五六八十])人(?:在线|本地|同屏|联机|合作|开黑|成行|同行|解谜|生存)?", blob)
+    m_cn = re.search(
+        r"(?<!第)([双两二三四五六八十])个?人(?!称|类|物|生|工|员|士|民|口|家|情|格|性|设|像|偶|形|体|头|脸|眼|手|脚|们)"
+        r"(?:在线|本地|同屏|联机|合作|开黑|成行|同行|解谜|生存|游玩|组队|派对|小队)?",
+        cleaned_blob,
+    )
     if m_cn and m_cn.group(1) in _CN_NUM:
         return _CN_NUM[m_cn.group(1)]
     return None
@@ -81,13 +91,13 @@ def parse_curator_recommendations(payload_or_html, curator_name: str = "Steam鉴
         name = (img.get("alt", "").strip() if img else "") or f"App {appid}"
         header_image = img.get("src", "").strip() if img else ""
         disc_block = cap.select_one(".discount_block")
-        price_final = 0.0
+        price_final: float | None = None
         discount_pct = 0
         if disc_block:
             try:
                 price_final = float(disc_block.get("data-price-final", 0) or 0) / 100.0
             except Exception:
-                price_final = 0.0
+                price_final = None
             try:
                 discount_pct = int(disc_block.get("data-discount", 0) or 0)
             except Exception:
@@ -109,7 +119,8 @@ def parse_curator_recommendations(payload_or_html, curator_name: str = "Steam鉴
         blurb = re.sub(r"每日福利游戏激活码[：:]\s*[A-Za-z0-9\-]+", "", blurb or "")
         blurb = re.sub(r"(求关注|点个关注|欢迎关注|记得关注)[~～!！。\s]*", "", blurb)
         blurb = re.sub(r"^[\s、，,。:：\-]+|[\s、，,。:：\-]+$", "", blurb).strip()
-        if blurb and re.search(NEGATIVE_CURATOR_PATTERNS, blurb, re.I):
+        blurb_for_neg = _NEGATED_PRAISE_RE.sub("", blurb) if blurb else ""
+        if blurb_for_neg and re.search(NEGATIVE_CURATOR_PATTERNS, blurb_for_neg, re.I):
             attitude = "not_recommended"
             voted_up = 0
         link_el = rec.select_one("a.recommendation_link") or cap
@@ -159,15 +170,20 @@ def parse_appdetails(payload, appid=None):
     genre_names = [str(g.get("description", "")).strip() for g in genres if isinstance(g, dict) and g.get("description")]
     app_type = d.get("type", "game")
     demos = d.get("demos") or []
-    short_desc = d.get("short_description")
+    raw_short_desc = d.get("short_description")
+    short_desc = html.unescape(raw_short_desc).strip() if isinstance(raw_short_desc, str) else raw_short_desc
+    is_free = bool(d.get("is_free", False))
+    price_cny = (p["final"] / 100.0) if (isinstance(p, dict) and p.get("final") is not None) else (0.0 if is_free else None)
+    coming_soon = int(bool((d.get("release_date") or {}).get("coming_soon")))
     max_players = infer_max_players(short_desc, categories=category_names, tags=genre_names)
     return {
         "appid": appid or d.get("steam_appid"),
-        "name": d.get("name", ""),
+        "name": html.unescape(str(d.get("name", ""))).strip(),
         "type": app_type,
-        "is_free": int(d.get("is_free", False)),
-        "price_cny": p.get("final", 0) / 100,
-        "discount_pct": p.get("discount_percent", 0),
+        "is_free": int(is_free),
+        "coming_soon": coming_soon,
+        "price_cny": price_cny,
+        "discount_pct": p.get("discount_percent", 0) if isinstance(p, dict) else 0,
         "categories_json": category_names,
         "category_ids": category_ids,
         "genre_names": genre_names,
@@ -183,21 +199,44 @@ def parse_appdetails(payload, appid=None):
 def parse_store_page(raw):
     text = raw if isinstance(raw, str) else raw.get("text", raw.get("__text__", ""))
     tags = []
-    m = re.search(r"InitAppTagModal\s*\([^,]+,\s*(\[.*?\])\s*\)", text, re.S)
+    m = re.search(r"InitAppTagModal\s*\([^,]+,\s*", text, re.S)
     if m:
-        try:
-            vals = json.loads(html.unescape(m.group(1)))
-            tags = [{"id": int(x.get("tagid", x.get("id", 0))), "name": x.get("name", "")} for x in vals if isinstance(x, dict)]
-        except Exception:
-            pass
+        rest = text[m.end() :].lstrip()
+        if rest.startswith("["):
+            vals = None
+            for candidate in (rest, html.unescape(rest)):
+                try:
+                    vals, _ = json.JSONDecoder().raw_decode(candidate)
+                    break
+                except Exception:
+                    continue
+            if isinstance(vals, list):
+                tags = [
+                    {"id": int(x.get("tagid", x.get("id", 0))), "name": x.get("name", "")}
+                    for x in vals
+                    if isinstance(x, dict)
+                ]
     props = []
-    for node in re.findall(r"<[^>]*data-featuretarget=[\"']appreviews[\"'][^>]*>", text, re.I | re.S):
-        m = re.search(r"data-props=[\"'](.*?)[\"']", node, re.I | re.S)
-        if m:
-            try:
-                props.append(json.loads(html.unescape(m.group(1))))
-            except Exception:
-                pass
+    if BeautifulSoup is not None and text:
+        soup = BeautifulSoup(text, "html.parser")
+        for el in soup.find_all(attrs={"data-featuretarget": re.compile(r"^appreviews$", re.I)}):
+            raw_props = el.get("data-props")
+            if not raw_props:
+                continue
+            for candidate in (raw_props, html.unescape(raw_props)):
+                try:
+                    props.append(json.loads(candidate))
+                    break
+                except Exception:
+                    continue
+    if not props and text:
+        for node in re.findall(r"<[^>]*data-featuretarget=[\"']appreviews[\"'][^>]*>", text, re.I | re.S):
+            m = re.search(r"""data-props=(["'])(.*?)\1""", node, re.I | re.S)
+            if m:
+                try:
+                    props.append(json.loads(html.unescape(m.group(2))))
+                except Exception:
+                    pass
     return {"tags": tags, "review_props": props}
 
 

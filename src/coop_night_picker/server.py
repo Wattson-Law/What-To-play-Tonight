@@ -203,13 +203,13 @@ def _markdown(groups, avoid, players, horror, budget, mode="online", tag=None):
     for score, games in groups.items():
         tier = REVIEW_TIERS[int(score)]
         if int(score) == 0:
-            lines += ["**【🧪 整活新品 & 热门愿望单试玩专区（未发先火 / 刚出新游 / 免费Demo）】**"]
+            lines += ["**【🧪 整活新品 & 免费试玩专区（刚出新游 / 可下 Demo）】**"]
         else:
             lines += [f"**【{tier['stars']} {tier['zh']}（Score {score}）】**"]
         display_cap = 2 if len(groups) >= 3 else 3
         for i, g in enumerate(games[:display_cap], 1):
-            price = "免费" if g["is_free"] else (f"¥{float(g['price_cny']):g}" if g.get("price_cny") else "即将推出/免费试玩")
-            if g.get("has_demo") and not g["is_free"]:
+            price = "免费" if g["is_free"] else (f"¥{float(g['price_cny']):g}" if g.get("price_cny") else ("免费试玩 Demo" if g.get("has_demo") else "待定"))
+            if g.get("has_demo") and not g["is_free"] and g.get("price_cny"):
                 price += "（含免费Demo）"
             coop_label = "在线合作" if mode == "online" else ("本地合作" if mode == "local" else "在线/本地合作")
             lines.append(f"{i}. **《{g['name']}》** — {price} | 支持 {g.get('max_players') or '?'} 人{coop_label}")
@@ -315,14 +315,19 @@ def _live_curator_recommend(horror, budget, players, mode, excluded, limit_per_t
     groups = {}
     avoid = []
     for g in by_app.values():
+        if not db.is_playable_game(g):
+            continue
         if horror in {"none", "mild", "scary"} and g["horror_level"] != horror:
             continue
         if players and g.get("max_players") and int(g["max_players"]) < players:
             continue
         if budget == "free_or_demo" and not (g["is_free"] or g["has_demo"]):
             continue
-        if budget == "under_50" and float(g.get("price_cny") or 0) >= 50:
-            continue
+        if budget == "under_50":
+            price_val = g.get("price_cny")
+            is_under_50 = bool(g["is_free"]) or (price_val is not None and 0 < float(price_val) < 50) or (bool(g["has_demo"]) and not price_val)
+            if not is_under_50:
+                continue
         if budget == "any_paid" and g["is_free"]:
             continue
         if tag and not db._matches_tag(g, tag):
@@ -421,7 +426,14 @@ def recommend_coop_games(
             for g in avoid
             if budget == "any"
             or (budget == "free_or_demo" and (g["is_free"] or g["has_demo"]))
-            or (budget == "under_50" and float(g.get("price_cny") or 0) < 50)
+            or (
+                budget == "under_50"
+                and (
+                    g["is_free"]
+                    or (g.get("price_cny") is not None and 0 < float(g["price_cny"]) < 50)
+                    or (g["has_demo"] and not g.get("price_cny"))
+                )
+            )
             or (budget == "any_paid" and not g["is_free"])
         ][:3]
         query = {"horror": horror, "budget": budget, "players": players, "mode": mode, "session_duration": session_duration, "tag": tag}
@@ -481,7 +493,7 @@ def resolve_game(query: str, limit: int = 5) -> dict:
     if len(local) >= limit:
         return result
     try:
-        remote = SteamClient().store_search(query)
+        remote = SteamClient().store_search(query, l="schinese", cc="cn")
         if isinstance(remote, dict) and remote.get("unavailable"):
             result["meta"]["network"] = {
                 "ok": False,
@@ -489,8 +501,26 @@ def resolve_game(query: str, limit: int = 5) -> dict:
                 "status_code": remote.get("status_code"),
             }
             return result
-        items = remote.get("items", []) if isinstance(remote, dict) else (remote if isinstance(remote, list) else [])
-        result["items"].extend(items[: max(0, limit - len(local))])
+        if isinstance(remote, str):
+            items = extractor.parse_search_html(remote)
+        elif isinstance(remote, dict):
+            items = remote.get("items") or extractor.parse_search_html(
+                remote.get("results_html") or remote.get("html") or remote.get("text") or ""
+            )
+        elif isinstance(remote, list):
+            items = remote
+        else:
+            items = []
+        seen_ids = {int(x["appid"]) for x in result["items"] if x.get("appid") is not None}
+        for item in items:
+            if len(result["items"]) >= limit:
+                break
+            aid = item.get("appid") if isinstance(item, dict) else None
+            if aid is not None and int(aid) in seen_ids:
+                continue
+            if aid is not None:
+                seen_ids.add(int(aid))
+            result["items"].append(item)
         result["meta"]["source"] = "local+steam"
     except Exception as exc:
         result["meta"]["network"] = {"ok": False, "error": str(exc)}

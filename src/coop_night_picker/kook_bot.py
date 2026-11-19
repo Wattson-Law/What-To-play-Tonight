@@ -14,6 +14,23 @@ from . import server
 
 KOOK_API_BASE = "https://www.kookapp.cn/api/v3"
 KOOK_CONTENT_LIMIT = 1800
+RETRY_BASE_DELAY = 2.0
+PENDING_TTL_SECONDS = 600.0
+
+_HORROR_NEG_RE = re.compile(r"(?:不|别|勿|不要|不想|怕|拒绝|非)[^，。,！!？?\n]{0,4}(?:恐怖|吓人|惊悚)")
+_PAID_NOT_FREE_RE = re.compile(r"(?:不要免费|不玩免费|别免费|非免费|付费|买断|花钱)")
+_PRICE_CAP_RE = re.compile(r"(\d{1,4})\s*(?:元|块|rmb)?\s*(?:以内|以下|内|左右)")
+
+
+def _coerce_players(value: Any, default: int = 4) -> int:
+    if isinstance(value, bool) or value is None:
+        return default
+    if isinstance(value, (int, float)):
+        return max(2, min(16, int(value)))
+    nums = re.findall(r"\d+", str(value))
+    if nums:
+        return max(2, min(16, int(nums[-1])))
+    return default
 
 
 def split_reply_chunks(text: str, limit: int = KOOK_CONTENT_LIMIT) -> list[str]:
@@ -104,7 +121,10 @@ def parse_intent_from_text(text: str, defaults: dict[str, Any] | None = None) ->
         params.setdefault("players", 5)
 
     # Horror
-    if any(w in cleaned for w in ("不恐怖", "不要恐怖", "别恐怖", "胆小", "一点都不行", "非恐怖")):
+    if (
+        any(w in cleaned for w in ("不恐怖", "不要恐怖", "别恐怖", "胆小", "一点都不行", "非恐怖"))
+        or _HORROR_NEG_RE.search(cleaned)
+    ):
         params["horror"] = "none"
     elif any(w in cleaned for w in ("微恐", "心理恐怖", "一点点恐怖")):
         params["horror"] = "mild"
@@ -114,7 +134,18 @@ def parse_intent_from_text(text: str, defaults: dict[str, Any] | None = None) ->
         params.setdefault("horror", "any")
 
     # Budget
-    if any(w in low for w in ("50", "五十", "便宜", "平价")):
+    m_price_cap = _PRICE_CAP_RE.search(low)
+    if _PAID_NOT_FREE_RE.search(cleaned):
+        params["budget"] = "any_paid"
+    elif m_price_cap:
+        cap_val = int(m_price_cap.group(1))
+        if cap_val == 0:
+            params["budget"] = "free_or_demo"
+        elif cap_val <= 50:
+            params["budget"] = "under_50"
+        else:
+            params["budget"] = "any"
+    elif any(w in low for w in ("50", "五十", "便宜", "平价")):
         params["budget"] = "under_50"
     elif any(w in low for w in ("免费", "白嫖", "demo", "试玩", "0元")):
         params["budget"] = "free_or_demo"
@@ -160,8 +191,9 @@ def call_llm_for_params(user_text: str) -> dict[str, Any] | None:
     api_key = os.getenv("LLM_API_KEY") or os.getenv("GITHUB_TOKEN")
     if not api_key:
         return None
-    base_url = os.getenv("LLM_BASE_URL", "https://models.inference.ai.azure.com").rstrip("/")
-    model = os.getenv("LLM_MODEL", "gpt-4o-mini")
+    base_url = (os.getenv("LLM_BASE_URL") or "https://models.github.ai/inference").rstrip("/")
+    default_model = "openai/gpt-4o-mini" if "models.github.ai" in base_url else "gpt-4o-mini"
+    model = os.getenv("LLM_MODEL") or default_model
     prompt = (
         "将用户的联机游戏需求解析为JSON对象，字段仅限："
         '{"horror":"none|mild|scary|any|null","budget":"free_or_demo|under_50|any|null",'
@@ -196,13 +228,20 @@ def call_llm_for_params(user_text: str) -> dict[str, Any] | None:
 class KookBotSession:
     """Stateful KOOK channel coordinator with rate limiting."""
 
-    def __init__(self, cooldown_sec: float = 1.5):
+    def __init__(self, cooldown_sec: float = 1.5, pending_ttl_sec: float = PENDING_TTL_SECONDS):
         self.pending_channels: dict[str, dict[str, Any]] = {}
+        self.pending_since: dict[str, float] = {}
         self.last_reply_at: dict[str, float] = {}
         self.cooldown_sec = cooldown_sec
+        self.pending_ttl_sec = pending_ttl_sec
 
     def handle_message(self, channel_id: str, text: str, is_mentioned: bool = True) -> str | None:
         now = time.time()
+        if channel_id in self.pending_channels:
+            since = self.pending_since.get(channel_id, now)
+            if now - since > self.pending_ttl_sec:
+                self.pending_channels.pop(channel_id, None)
+                self.pending_since.pop(channel_id, None)
         in_pending = channel_id in self.pending_channels
         stripped = (text or "").strip()
         if re.search(r"\((?:met|rol)\)\d+\((?:met|rol)\)", stripped):
@@ -240,7 +279,14 @@ class KookBotSession:
                 return f"未在库中找到 AppID `{intent['appid']}`，可以用 `搜 游戏名` 先查一下。"
             quotes = card.get("positive_quotes") or []
             q_line = f"\n> {quotes[0]['quote_text']}" if quotes else ""
-            price_str = "免费" if card["is_free"] else f"¥{card['price_cny']}"
+            if card["is_free"]:
+                price_str = "免费"
+            elif card.get("price_cny"):
+                price_str = f"¥{float(card['price_cny']):g}"
+            elif card.get("has_demo"):
+                price_str = "免费试玩 Demo"
+            else:
+                price_str = "待定"
             return (
                 f"**🎮 《{card['name']}》**（AppID: `{card['appid']}`）\n"
                 f"- **评价**：{card['stars']} {card['review_tier']}（全语言 {card['positive_pct']}%｜简中 {card.get('schinese_pct') or '—'}%）\n"
@@ -257,7 +303,7 @@ class KookBotSession:
                 return f"没有搜到与「{intent['query']}」相关的联机游戏。"
             lines = [f"🔎 **「{intent['query']}」搜索结果**："]
             for it in items[:5]:
-                lines.append(f"- **《{it.get('name')}》**（AppID: `{it.get('appid')}`）— {it.get('review_tier_zh', '未知')}")
+                lines.append(f"- **《{it.get('name')}》**（AppID: `{it.get('appid')}`）— {it.get('review_tier_zh', 'Steam 商店')}")
             lines.append("\n发送 `@我 详情 <AppID>` 可查看完整评测卡，发送 `@我 玩过 <AppID>` 可排除该游戏。")
             return "\n".join(lines)
 
@@ -282,12 +328,13 @@ class KookBotSession:
 
         if intent["action"] == "recommend":
             self.pending_channels.pop(channel_id, None)
+            self.pending_since.pop(channel_id, None)
             self.last_reply_at[channel_id] = now
             p = intent["params"]
             res = server.recommend_coop_games(
                 horror=p.get("horror", "any"),
                 budget=p.get("budget", "any"),
-                players=int(p.get("players") or 4),
+                players=_coerce_players(p.get("players"), 4),
                 mode=p.get("mode", "online"),
                 tag=p.get("tag"),
                 confirmed=True,
@@ -298,6 +345,7 @@ class KookBotSession:
             return res["markdown_preview"]
 
         self.pending_channels[channel_id] = intent.get("params") or {}
+        self.pending_since[channel_id] = now
         self.last_reply_at[channel_id] = now
         params = intent.get("params") or {}
         missing: list[str] = []
@@ -314,14 +362,81 @@ class KookBotSession:
         return f"{header}\n直接回一句就行（不用再次@我），例如 `4人 不恐怖 50以内`：\n{numbered}"
 
 
-async def run_kook_ws(token: str, max_runtime_seconds: int = 19800) -> None:
-    """Connect to KOOK WebSocket gateway AND poll text channels so no message is ever missed."""
+async def _kook_get_json(
+    http: httpx.AsyncClient,
+    path: str,
+    *,
+    params: dict[str, Any] | None = None,
+    attempts: int = 5,
+    deadline: float | None = None,
+) -> dict[str, Any]:
+    """GET a KOOK v3 API endpoint with exponential backoff for cross-border timeouts and 429/5xx."""
+    last_exc: Exception | None = None
+    url = f"{KOOK_API_BASE}/{path.lstrip('/')}"
+    for attempt in range(max(1, attempts)):
+        if deadline is not None and time.time() >= deadline:
+            break
+        try:
+            resp = await http.get(url, params=params)
+            status = getattr(resp, "status_code", 200)
+            if status == 429:
+                headers = getattr(resp, "headers", {}) or {}
+                retry_after = float(headers.get("X-Rate-Limit-Reset") or headers.get("Retry-After") or (RETRY_BASE_DELAY * (2**attempt)))
+                delay = min(30.0, max(RETRY_BASE_DELAY, retry_after))
+                if deadline is not None:
+                    delay = min(delay, max(0.0, deadline - time.time()))
+                if delay > 0:
+                    await asyncio.sleep(delay)
+                continue
+            if status >= 500:
+                raise RuntimeError(f"KOOK HTTP {status} for {path}")
+            body = resp.json()
+            if not isinstance(body, dict):
+                raise RuntimeError(f"Unexpected KOOK JSON payload for {path}")
+            return body
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            last_exc = exc
+            if attempt + 1 >= attempts:
+                break
+            delay = min(30.0, RETRY_BASE_DELAY * (2**attempt))
+            if deadline is not None:
+                remaining = deadline - time.time()
+                if remaining <= 0:
+                    break
+                delay = min(delay, remaining)
+            print(f"KOOK GET {path} attempt {attempt + 1}/{attempts} failed ({type(exc).__name__}: {exc}); retrying in {delay:.1f}s", flush=True)
+            await asyncio.sleep(delay)
+    if last_exc is not None:
+        raise last_exc
+    raise RuntimeError(f"KOOK GET {path} exhausted before deadline")
+
+
+async def run_kook_ws(token: str, max_runtime_seconds: float = 19800) -> None:
+    """Connect to KOOK WebSocket gateway with automatic reconnection + gentle REST fallback."""
     import websockets
 
     headers = {"Authorization": f"Bot {token}"}
-    async with httpx.AsyncClient(timeout=15.0, headers=headers) as http:
-        me_resp = await http.get(f"{KOOK_API_BASE}/user/me")
-        me_data = me_resp.json()
+    started_at = time.time()
+    deadline = started_at + max_runtime_seconds
+    async with httpx.AsyncClient(timeout=30.0, headers=headers) as http:
+        me_data: dict[str, Any] | None = None
+        while time.time() < deadline:
+            try:
+                me_data = await _kook_get_json(http, "/user/me", attempts=4, deadline=deadline)
+                break
+            except Exception as exc:
+                remaining = deadline - time.time()
+                if remaining <= 0:
+                    print(f"KOOK auth unavailable before runtime window ended: {exc}", flush=True)
+                    return
+                delay = min(30.0, RETRY_BASE_DELAY * 2, remaining)
+                print(f"KOOK auth network retry in {delay:.1f}s: {exc}", flush=True)
+                await asyncio.sleep(delay)
+
+        if not me_data:
+            return
         if me_data.get("code") != 0:
             raise RuntimeError(f"KOOK auth failed: code={me_data.get('code')} msg={me_data.get('message')}")
         bot_id = str(me_data["data"]["id"])
@@ -330,29 +445,45 @@ async def run_kook_ws(token: str, max_runtime_seconds: int = 19800) -> None:
 
         session = KookBotSession()
         seen_msg_ids: set[str] = set()
-        started_at = time.time()
         max_message_age_seconds = int(os.getenv("KOOK_MAX_MESSAGE_AGE_SECONDS", "900"))
+        ws_connected = False
 
-        # Discover text channels and snapshot existing message IDs on startup
+        # Discover text channels and snapshot existing message IDs on startup (without pre-warming pending dialogs)
         text_channels: list[str] = []
         try:
-            g_resp = await http.get(f"{KOOK_API_BASE}/guild/list")
-            for g in g_resp.json().get("data", {}).get("items", []):
-                c_resp = await http.get(f"{KOOK_API_BASE}/channel/list", params={"guild_id": g["id"]})
-                for ch in c_resp.json().get("data", {}).get("items", []):
+            g_data = await _kook_get_json(http, "/guild/list", attempts=2, deadline=deadline)
+            for g in g_data.get("data", {}).get("items", []):
+                try:
+                    c_data = await _kook_get_json(http, "/channel/list", params={"guild_id": g["id"]}, attempts=2, deadline=deadline)
+                except Exception as exc:
+                    print(f"Channel list warning guild={g.get('id')}: {exc}", flush=True)
+                    continue
+                for ch in c_data.get("data", {}).get("items", []):
                     if ch.get("type") == 1:
                         cid = str(ch["id"])
                         text_channels.append(cid)
-                        # Pre-warm pending state on default channels so direct follow-up replies work immediately
-                        session.pending_channels.setdefault(cid, {})
-                        m_resp = await http.get(f"{KOOK_API_BASE}/message/list", params={"target_id": cid, "page_size": 20})
-                        for m in m_resp.json().get("data", {}).get("items", []):
-                            if m.get("id"):
-                                seen_msg_ids.add(str(m["id"]))
+                        try:
+                            m_data = await _kook_get_json(
+                                http, "/message/list", params={"target_id": cid, "page_size": 20}, attempts=2, deadline=deadline
+                            )
+                            for m in m_data.get("data", {}).get("items", []):
+                                if m.get("id"):
+                                    seen_msg_ids.add(str(m["id"]))
+                        except Exception as exc:
+                            print(f"Channel history warning channel={cid}: {exc}", flush=True)
         except Exception as exc:
             print(f"Channel discovery warning: {exc}", flush=True)
 
-        async def process_incoming(channel_id: str, msg_id: str, author_id: str, is_bot: bool, content: str, is_mentioned: bool, is_dm: bool = False, created_ms=None):
+        async def process_incoming(
+            channel_id: str,
+            msg_id: str,
+            author_id: str,
+            is_bot: bool,
+            content: str,
+            is_mentioned: bool,
+            is_dm: bool = False,
+            created_ms=None,
+        ):
             if not msg_id or msg_id in seen_msg_ids:
                 return
             seen_msg_ids.add(msg_id)
@@ -366,7 +497,11 @@ async def run_kook_ws(token: str, max_runtime_seconds: int = 19800) -> None:
                 if age > max_message_age_seconds:
                     print(f"Skip stale msg_id={msg_id} age={age:.0f}s", flush=True)
                     return
-            reply = session.handle_message(channel_id, content, is_mentioned=is_mentioned)
+            try:
+                reply = await asyncio.to_thread(session.handle_message, channel_id, content, is_mentioned)
+            except Exception as exc:
+                print(f"Handle message error msg_id={msg_id} channel={channel_id}: {type(exc).__name__}: {exc}", flush=True)
+                return
             if not reply:
                 return
             endpoint = f"{KOOK_API_BASE}/direct-message/create" if is_dm else f"{KOOK_API_BASE}/message/create"
@@ -375,27 +510,43 @@ async def run_kook_ws(token: str, max_runtime_seconds: int = 19800) -> None:
                 payload = {"type": 9, "target_id": channel_id, "content": chunk}
                 if index == 1:
                     payload["quote"] = msg_id
-                try:
-                    resp = await http.post(endpoint, json=payload)
+                for send_attempt in range(2):
                     try:
-                        body = resp.json()
-                    except Exception:
-                        body = {}
-                    code = body.get("code")
-                    print(
-                        f"Reply {index}/{len(chunks)} msg_id={msg_id} channel={channel_id} "
-                        f"http={resp.status_code} code={code} msg={body.get('message', '')} len={len(chunk)}",
-                        flush=True,
-                    )
-                except Exception as exc:
-                    print(f"Reply failed {index}/{len(chunks)} msg_id={msg_id}: {exc}", flush=True)
+                        resp = await http.post(endpoint, json=payload)
+                        try:
+                            body = resp.json()
+                        except Exception:
+                            body = {}
+                        code = body.get("code")
+                        print(
+                            f"Reply {index}/{len(chunks)} msg_id={msg_id} channel={channel_id} "
+                            f"http={resp.status_code} code={code} msg={body.get('message', '')} len={len(chunk)}",
+                            flush=True,
+                        )
+                        if getattr(resp, "status_code", 200) == 429 and send_attempt == 0:
+                            await asyncio.sleep(min(5.0, RETRY_BASE_DELAY))
+                            continue
+                        break
+                    except Exception as exc:
+                        print(f"Reply failed {index}/{len(chunks)} msg_id={msg_id}: {exc}", flush=True)
+                        if send_attempt == 0:
+                            await asyncio.sleep(min(2.0, RETRY_BASE_DELAY))
 
         async def poll_channels():
-            while time.time() - started_at < max_runtime_seconds:
-                await asyncio.sleep(2.5)
+            while time.time() < deadline:
+                interval = 12.0 if ws_connected else 4.0
+                remaining = deadline - time.time()
+                if remaining <= 0:
+                    break
+                await asyncio.sleep(min(interval, remaining))
                 for cid in list(text_channels):
+                    if time.time() >= deadline:
+                        break
                     try:
                         m_resp = await http.get(f"{KOOK_API_BASE}/message/list", params={"target_id": cid, "page_size": 10})
+                        if getattr(m_resp, "status_code", 200) == 429:
+                            await asyncio.sleep(min(15.0, max(RETRY_BASE_DELAY * 2, 5.0)))
+                            break
                         items = m_resp.json().get("data", {}).get("items", [])
                         for m in items[-5:]:
                             mid = str(m.get("id") or "")
@@ -424,60 +575,133 @@ async def run_kook_ws(token: str, max_runtime_seconds: int = 19800) -> None:
                                 is_dm=False,
                                 created_ms=m.get("create_time"),
                             )
+                        if len(text_channels) > 1:
+                            await asyncio.sleep(0.2)
+                    except asyncio.CancelledError:
+                        raise
                     except Exception:
                         pass
 
         poll_task = asyncio.create_task(poll_channels())
+        reconnect_attempt = 0
         try:
-            gw_resp = await http.get(f"{KOOK_API_BASE}/gateway/index", params={"compress": 0})
-            gw_url = gw_resp.json()["data"]["url"]
-            sn = 0
-            async with websockets.connect(gw_url, ping_interval=None) as ws:
-                async def heartbeat():
-                    while time.time() - started_at < max_runtime_seconds:
-                        await asyncio.sleep(26)
-                        await ws.send(json.dumps({"s": 2, "sn": sn}))
-
-                hb_task = asyncio.create_task(heartbeat())
+            while time.time() < deadline:
+                ws_connected = False
                 try:
-                    while time.time() - started_at < max_runtime_seconds:
+                    gw_data = await _kook_get_json(http, "/gateway/index", params={"compress": 0}, attempts=3, deadline=deadline)
+                    gw_url = (gw_data.get("data") or {}).get("url") if gw_data.get("code") == 0 else None
+                    if not gw_url:
+                        raise RuntimeError(f"Invalid KOOK gateway response: code={gw_data.get('code')} msg={gw_data.get('message')}")
+                    sn = 0
+                    last_pong_at = time.time()
+                    async with websockets.connect(gw_url, open_timeout=30, close_timeout=10, ping_interval=None) as ws:
+                        ws_connected = True
+                        reconnect_attempt = 0
+                        print("KOOK WebSocket connected", flush=True)
+
+                        async def heartbeat():
+                            while time.time() < deadline:
+                                remaining_hb = deadline - time.time()
+                                if remaining_hb <= 0:
+                                    break
+                                await asyncio.sleep(min(25.0, remaining_hb))
+                                if time.time() >= deadline:
+                                    break
+                                if time.time() - last_pong_at > 80.0:
+                                    print("KOOK WebSocket pong timeout; forcing reconnect", flush=True)
+                                    try:
+                                        await ws.close()
+                                    except Exception:
+                                        pass
+                                    break
+                                try:
+                                    await ws.send(json.dumps({"s": 2, "sn": sn}))
+                                except asyncio.CancelledError:
+                                    raise
+                                except Exception as hb_exc:
+                                    print(f"Heartbeat send stopped: {hb_exc}", flush=True)
+                                    break
+
+                        hb_task = asyncio.create_task(heartbeat())
                         try:
-                            raw = await asyncio.wait_for(ws.recv(), timeout=35.0)
-                        except asyncio.TimeoutError:
-                            continue
-                        packet = json.loads(raw)
-                        if packet.get("s") == 0:
-                            sn = max(sn, int(packet.get("sn") or 0))
-                            d = packet.get("d") or {}
-                            if d.get("type") == 255 or d.get("channel_type") not in {"GROUP", "PERSON"}:
-                                continue
-                            extra_author = d.get("extra", {}).get("author", {}) or {}
-                            content = str(d.get("content") or "")
-                            channel_id = str(d.get("target_id") or "")
-                            mentions = [str(x) for x in (d.get("extra", {}).get("mention") or [])]
-                            mention_roles = [str(x) for x in (d.get("extra", {}).get("mention_roles") or [])]
-                            is_dm = d.get("channel_type") == "PERSON"
-                            is_mentioned = (
-                                is_dm
-                                or bot_id in mentions
-                                or bool(mention_roles)
-                                or f"(met){bot_id}(met)" in content
-                                or "(rol)" in content
-                            )
-                            await process_incoming(
-                                channel_id=channel_id,
-                                msg_id=str(d.get("msg_id") or ""),
-                                author_id=str(d.get("author_id") or ""),
-                                is_bot=bool(extra_author.get("bot")),
-                                content=content,
-                                is_mentioned=is_mentioned,
-                                is_dm=is_dm,
-                                created_ms=d.get("msg_timestamp"),
-                            )
-                finally:
-                    hb_task.cancel()
+                            while time.time() < deadline:
+                                remaining_ws = deadline - time.time()
+                                if remaining_ws <= 0:
+                                    break
+                                try:
+                                    raw = await asyncio.wait_for(ws.recv(), timeout=min(35.0, max(0.05, remaining_ws)))
+                                except asyncio.TimeoutError:
+                                    continue
+                                try:
+                                    packet = json.loads(raw)
+                                except Exception:
+                                    continue
+                                sig = packet.get("s")
+                                if sig == 1:
+                                    hello_code = (packet.get("d") or {}).get("code", 0)
+                                    if hello_code != 0:
+                                        print(f"KOOK hello error code={hello_code}; reconnecting", flush=True)
+                                        break
+                                    last_pong_at = time.time()
+                                elif sig == 3:
+                                    last_pong_at = time.time()
+                                elif sig == 5:
+                                    print(f"KOOK requested reconnect (s=5): {packet.get('d')}", flush=True)
+                                    break
+                                elif sig == 0:
+                                    sn = max(sn, int(packet.get("sn") or 0))
+                                    d = packet.get("d") or {}
+                                    if d.get("type") == 255 or d.get("channel_type") not in {"GROUP", "PERSON"}:
+                                        continue
+                                    extra_author = d.get("extra", {}).get("author", {}) or {}
+                                    content = str(d.get("content") or "")
+                                    channel_id = str(d.get("target_id") or "")
+                                    mentions = [str(x) for x in (d.get("extra", {}).get("mention") or [])]
+                                    mention_roles = [str(x) for x in (d.get("extra", {}).get("mention_roles") or [])]
+                                    is_dm = d.get("channel_type") == "PERSON"
+                                    is_mentioned = (
+                                        is_dm
+                                        or bot_id in mentions
+                                        or bool(mention_roles)
+                                        or f"(met){bot_id}(met)" in content
+                                        or "(rol)" in content
+                                    )
+                                    await process_incoming(
+                                        channel_id=channel_id,
+                                        msg_id=str(d.get("msg_id") or ""),
+                                        author_id=str(d.get("author_id") or ""),
+                                        is_bot=bool(extra_author.get("bot")),
+                                        content=content,
+                                        is_mentioned=is_mentioned,
+                                        is_dm=is_dm,
+                                        created_ms=d.get("msg_timestamp"),
+                                    )
+                        finally:
+                            ws_connected = False
+                            hb_task.cancel()
+                            await asyncio.gather(hb_task, return_exceptions=True)
+
+                    # Clean break (e.g. s=5 reconnect): pause briefly before reconnecting
+                    remaining_after = deadline - time.time()
+                    if remaining_after > 0:
+                        await asyncio.sleep(min(RETRY_BASE_DELAY, remaining_after))
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    ws_connected = False
+                    reconnect_attempt += 1
+                    remaining_err = deadline - time.time()
+                    if remaining_err <= 0:
+                        break
+                    delay = min(60.0, RETRY_BASE_DELAY * (2 ** min(reconnect_attempt - 1, 5)), remaining_err)
+                    print(
+                        f"KOOK WebSocket disconnected ({type(exc).__name__}: {exc}); reconnecting in {delay:.1f}s",
+                        flush=True,
+                    )
+                    await asyncio.sleep(delay)
         finally:
             poll_task.cancel()
+            await asyncio.gather(poll_task, return_exceptions=True)
 
 
 def main() -> None:
