@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+import datetime
 import html
 import json
 import math
 import re
 from collections import Counter
 
-from .constants import CATEGORY_ZH, NEGATIVE_CURATOR_PATTERNS, REVIEW_KEYWORDS, TAG_ZH
+from .constants import CATEGORY_ZH, INDIE_PUBLISHER_WHITELIST, NEGATIVE_CURATOR_PATTERNS, REVIEW_KEYWORDS, TAG_ZH
 
 try:
     from bs4 import BeautifulSoup
@@ -58,11 +59,13 @@ def parse_search_html(raw):
             aid = int(a.get("data-ds-appid", "").split(",")[0])
         except Exception:
             continue
+        rel_el = a.select_one(".search_released")
         out.append(
             {
                 "appid": aid,
                 "name": a.select_one(".title").get_text(" ", strip=True) if a.select_one(".title") else "",
                 "tag_ids": [int(x) for x in re.findall(r"\d+", a.get("data-ds-tagids", ""))],
+                "release_date_text": rel_el.get_text(" ", strip=True) if rel_el else "",
             }
         )
     return out
@@ -174,7 +177,25 @@ def parse_appdetails(payload, appid=None):
     short_desc = html.unescape(raw_short_desc).strip() if isinstance(raw_short_desc, str) else raw_short_desc
     is_free = bool(d.get("is_free", False))
     price_cny = (p["final"] / 100.0) if (isinstance(p, dict) and p.get("final") is not None) else (0.0 if is_free else None)
-    coming_soon = int(bool((d.get("release_date") or {}).get("coming_soon")))
+    rel_obj = d.get("release_date") or {}
+    coming_soon = int(bool(rel_obj.get("coming_soon")))
+    release_date = str(rel_obj.get("date") or "").strip()
+    langs = str(d.get("supported_languages") or "")
+    has_schinese = int("简体中文" in langs or "simplified chinese" in langs.lower())
+    has_trailer = int(bool(d.get("movies")))
+    screenshot_count = len(d.get("screenshots") or [])
+    developers_json = [str(x).strip() for x in (d.get("developers") or []) if str(x).strip()]
+    publishers_json = [str(x).strip() for x in (d.get("publishers") or []) if str(x).strip()]
+    raw_fullgame = (d.get("fullgame") or {}).get("appid")
+    try:
+        fullgame_appid = int(raw_fullgame) if raw_fullgame is not None and str(raw_fullgame).strip().isdigit() else None
+    except (TypeError, ValueError):
+        fullgame_appid = None
+    raw_demo_id = (demos or [{}])[0].get("appid")
+    try:
+        demo_appid = int(raw_demo_id) if raw_demo_id is not None and str(raw_demo_id).strip().isdigit() else None
+    except (TypeError, ValueError):
+        demo_appid = None
     max_players = infer_max_players(short_desc, categories=category_names, tags=genre_names)
     return {
         "appid": appid or d.get("steam_appid"),
@@ -182,6 +203,12 @@ def parse_appdetails(payload, appid=None):
         "type": app_type,
         "is_free": int(is_free),
         "coming_soon": coming_soon,
+        "release_date": release_date,
+        "has_schinese": has_schinese,
+        "has_trailer": has_trailer,
+        "screenshot_count": screenshot_count,
+        "developers_json": developers_json,
+        "publishers_json": publishers_json,
         "price_cny": price_cny,
         "discount_pct": p.get("discount_percent", 0) if isinstance(p, dict) else 0,
         "categories_json": category_names,
@@ -190,8 +217,8 @@ def parse_appdetails(payload, appid=None):
         "short_desc": short_desc,
         "header_image": d.get("header_image"),
         "has_demo": int(app_type == "demo" or bool(demos)),
-        "demo_appid": (demos or [{}])[0].get("appid"),
-        "fullgame_appid": (d.get("fullgame") or {}).get("appid"),
+        "demo_appid": demo_appid,
+        "fullgame_appid": fullgame_appid,
         "max_players": max_players,
     }
 
@@ -237,7 +264,136 @@ def parse_store_page(raw):
                     props.append(json.loads(html.unescape(m.group(2))))
                 except Exception:
                     pass
-    return {"tags": tags, "review_props": props}
+    low = text.lower() if text else ""
+    has_ai_disclosure = int("ai generated content disclosure" in low or "ai 生成内容披露" in low or "ai生成内容披露" in low)
+    return {"tags": tags, "review_props": props, "has_ai_disclosure": has_ai_disclosure}
+
+
+_MONTH_MAP = {
+    "jan": 1,
+    "feb": 2,
+    "mar": 3,
+    "apr": 4,
+    "may": 5,
+    "jun": 6,
+    "jul": 7,
+    "aug": 8,
+    "sep": 9,
+    "oct": 10,
+    "nov": 11,
+    "dec": 12,
+}
+
+
+def parse_release_age_days(release_date_str: str | dict | None, today: datetime.date | None = None) -> int | None:
+    """Parse Steam CN/EN release date string into integer days since release, or None if unreleased/unknown."""
+    if isinstance(release_date_str, dict):
+        release_date_str = release_date_str.get("date")
+    raw = str(release_date_str or "").strip()
+    if not raw:
+        return None
+    ref = today or datetime.datetime.now(datetime.timezone.utc).date()
+    parsed: datetime.date | None = None
+
+    m_cn = re.search(r"(\d{4})\s*年\s*(\d{1,2})\s*月\s*(\d{1,2})\s*日", raw)
+    if m_cn:
+        try:
+            parsed = datetime.date(int(m_cn.group(1)), int(m_cn.group(2)), int(m_cn.group(3)))
+        except ValueError:
+            parsed = None
+
+    if parsed is None:
+        m_iso = re.search(r"(\d{4})-(\d{1,2})-(\d{1,2})", raw)
+        if m_iso:
+            try:
+                parsed = datetime.date(int(m_iso.group(1)), int(m_iso.group(2)), int(m_iso.group(3)))
+            except ValueError:
+                parsed = None
+
+    if parsed is None:
+        m_en1 = re.search(r"([A-Za-z]{3,9})\s+(\d{1,2}),?\s+(\d{4})", raw)
+        m_en2 = re.search(r"(\d{1,2})\s+([A-Za-z]{3,9}),?\s+(\d{4})", raw)
+        if m_en1:
+            mon = _MONTH_MAP.get(m_en1.group(1)[:3].lower())
+            if mon:
+                try:
+                    parsed = datetime.date(int(m_en1.group(3)), mon, int(m_en1.group(2)))
+                except ValueError:
+                    parsed = None
+        elif m_en2:
+            mon = _MONTH_MAP.get(m_en2.group(2)[:3].lower())
+            if mon:
+                try:
+                    parsed = datetime.date(int(m_en2.group(3)), mon, int(m_en2.group(1)))
+                except ValueError:
+                    parsed = None
+
+    if parsed is None:
+        return None
+    delta = (ref - parsed).days
+    return max(0, delta) if delta >= -1 else None
+
+
+def compute_potential_score(
+    *,
+    current_players: int = 0,
+    followers: int = 0,
+    age_days: int | None = None,
+    recent_news_count: int = 0,
+    has_schinese: int | bool = 0,
+    has_trailer: int | bool = 0,
+    has_ai_disclosure: int | bool = 0,
+    total_reviews: int = 0,
+    positive_pct: float = 0.0,
+    developers: list[str] | None = None,
+    publishers: list[str] | None = None,
+    from_wishlist: bool = False,
+) -> float:
+    """Score early-stage Demo potential using live traction, follower proxy, polish, and freshness."""
+    ccu = max(0, int(current_players or 0))
+    fol = max(0, int(followers or 0))
+    news = max(0, int(recent_news_count or 0))
+    revs = max(0, int(total_reviews or 0))
+    pos = float(positive_pct or 0.0)
+
+    has_traction = ccu >= 3 or fol >= 50 or news >= 1 or (revs >= 5 and pos >= 80.0) or from_wishlist
+    if not has_traction and not has_trailer:
+        # Zero-traction, no-trailer, no-news fresh Demo -> noise floor
+        base_noise = 1.0 if has_schinese else 0.5
+        if has_ai_disclosure:
+            base_noise = max(0.0, base_noise - 1.0)
+        return round(min(2.0, base_noise + 0.2 * math.log1p(fol)), 2)
+
+    score = 3.0 * math.log1p(ccu) + 2.0 * math.log1p(fol)
+    if has_schinese:
+        score += 2.0
+    if has_trailer:
+        score += 1.0
+    if news >= 1:
+        score += 1.5
+    if from_wishlist:
+        score += 1.5
+
+    credits = {str(x).strip().lower() for x in (developers or []) + (publishers or []) if str(x).strip()}
+    if credits & INDIE_PUBLISHER_WHITELIST:
+        score += 2.5
+
+    if revs >= 5 and pos >= 80.0:
+        velocity = revs / max(1, age_days if age_days is not None else 14)
+        score += min(6.0, 1.5 * math.log1p(velocity * 5.0))
+
+    if age_days is not None and has_traction:
+        if age_days <= 3:
+            score += 3.0
+        elif age_days <= 7:
+            score += 2.0
+        elif age_days <= 14:
+            score += 1.0
+
+    if has_ai_disclosure:
+        score -= 2.0
+
+    return round(max(0.0, score), 2)
 
 
 def parse_appreviews(payload):

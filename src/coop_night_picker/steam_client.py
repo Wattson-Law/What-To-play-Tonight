@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import time
 from pathlib import Path
 
@@ -104,3 +105,85 @@ class SteamClient:
 
     def top_curators(self, start: int = 0, count: int = 20):
         return self._request("curators/ajaxgetcurators/", start=start, count=count, l="schinese", cc="cn")
+
+    def _direct_get(self, url: str, params: dict | None = None, *, cache_key: str | None = None, timeout: float = 12.0):
+        key_src = cache_key or (url + json.dumps(params or {}, sort_keys=True))
+        cp = self.cache / (hashlib.sha256(key_src.encode()).hexdigest() + ".json")
+        if cp.exists():
+            x = json.loads(cp.read_text(encoding="utf8"))
+            return x.get("__text__", "") if isinstance(x, dict) and "__text__" in x else x
+        if httpx is None:
+            return None
+        for attempt in range(self.retries + 1):
+            try:
+                sleep_s = max(0.0, min(self.throttle, 0.5) - (time.time() - self._last))
+                if sleep_s > 0:
+                    time.sleep(sleep_s)
+                self._last = time.time()
+                with httpx.Client(
+                    proxy=self.proxy,
+                    follow_redirects=False,
+                    timeout=timeout,
+                    headers={"User-Agent": "Mozilla/5.0"},
+                    transport=self.transport,
+                ) as c:
+                    r = c.get(url, params=params)
+                if 200 <= r.status_code < 300:
+                    try:
+                        d = r.json()
+                    except Exception:
+                        d = r.text
+                    cp.write_text(
+                        json.dumps(d, ensure_ascii=False)
+                        if not isinstance(d, str)
+                        else json.dumps({"__text__": d}, ensure_ascii=False),
+                        encoding="utf8",
+                    )
+                    return d
+            except Exception:
+                pass
+            if attempt < self.retries:
+                time.sleep(min(2**attempt, 4))
+        return None
+
+    def current_players(self, appid: int) -> int | None:
+        """Fetch live Steam concurrent players (zero API key required)."""
+        data = self._direct_get(
+            "https://api.steampowered.com/ISteamUserStats/GetNumberOfCurrentPlayers/v1/",
+            params={"appid": int(appid)},
+            cache_key=f"ccu:{int(appid)}",
+        )
+        if isinstance(data, dict):
+            resp = data.get("response") or {}
+            if resp.get("result") == 1 and resp.get("player_count") is not None:
+                try:
+                    return int(resp["player_count"])
+                except (TypeError, ValueError):
+                    return None
+        return None
+
+    def community_followers(self, appid: int) -> int | None:
+        """Fetch Steam Community Hub member/follower count (industry proxy for wishlists ~7-12x)."""
+        raw = self._direct_get(
+            f"https://steamcommunity.com/games/{int(appid)}/memberslistxml/",
+            params={"xml": 1},
+            cache_key=f"followers:{int(appid)}",
+        )
+        if isinstance(raw, str):
+            m = re.search(r"<memberCount>(\d+)</memberCount>", raw)
+            if m:
+                return int(m.group(1))
+        return None
+
+    def app_news(self, appid: int, count: int = 5) -> list[dict]:
+        """Fetch recent developer announcements / patch notes / devlogs for an app."""
+        data = self._direct_get(
+            "https://api.steampowered.com/ISteamNews/GetNewsForApp/v2/",
+            params={"appid": int(appid), "count": int(count)},
+            cache_key=f"news:{int(appid)}:{int(count)}",
+        )
+        if isinstance(data, dict):
+            items = (data.get("appnews") or {}).get("newsitems") or []
+            if isinstance(items, list):
+                return [x for x in items if isinstance(x, dict)]
+        return []

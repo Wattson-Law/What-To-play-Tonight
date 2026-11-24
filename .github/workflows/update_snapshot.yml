@@ -10,7 +10,8 @@ on:
       - "scripts/**"
       - ".github/workflows/update_snapshot.yml"
   schedule:
-    - cron: "17 3 * * 1"
+    # Run daily at 03:17 UTC (11:17 Beijing Time) so 1-2 day old potential Demos enter the radar promptly
+    - cron: "17 3 * * *"
   workflow_dispatch:
 
 permissions:
@@ -27,7 +28,7 @@ jobs:
       - name: Install dependencies
         run: python -m pip install -e .
       - name: Build curator-driven snapshot with reviews
-        run: python scripts/build_snapshot.py --limit 150 --with-reviews
+        run: python scripts/build_snapshot.py --limit 180 --with-reviews
       - name: Verify snapshot
         run: python scripts/verify_snapshot.py
       - name: Commit changed snapshot

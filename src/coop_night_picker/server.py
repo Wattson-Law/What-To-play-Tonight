@@ -174,6 +174,18 @@ def _format_game(game, conn=None):
         "curator_count": int(game.get("curator_count") or len(curators)),
         "curators": curators,
         "avoid_reasons": game.get("avoid_reasons_json") or game.get("avoid_reasons") or [],
+        "release_date": game.get("release_date") or "",
+        "release_age_days": game.get("release_age_days"),
+        "current_players": int(game.get("current_players") or 0),
+        "followers": int(game.get("followers") or 0),
+        "recent_news_count": int(game.get("recent_news_count") or 0),
+        "has_schinese": bool(game.get("has_schinese")),
+        "has_trailer": bool(game.get("has_trailer")),
+        "has_ai_disclosure": bool(game.get("has_ai_disclosure")),
+        "potential_score": float(game.get("potential_score") or 0.0),
+        "is_demo_radar": bool(game.get("is_demo_radar")),
+        "demo_appid": game.get("demo_appid"),
+        "fullgame_appid": game.get("fullgame_appid"),
     }
     if conn is not None:
         try:
@@ -224,6 +236,15 @@ def _markdown(groups, avoid, players, horror, budget, mode="online", tag=None):
                 f"   - 📊 **口碑**：全语言 {pos_pct}（{tier['zh']}，{g.get('total_reviews', 0)}篇）"
                 f"｜简中 {sc_pct}"
             )
+            if int(score) == 0 and (g.get("current_players") or g.get("followers")):
+                early_parts = []
+                if g.get("current_players"):
+                    early_parts.append(f"当前在线 {g['current_players']} 人")
+                if g.get("followers"):
+                    early_parts.append(f"本体关注 {g['followers']} 人")
+                if g.get("release_age_days") is not None:
+                    early_parts.append(f"上线 {g['release_age_days']} 天")
+                lines.append(f"   - 📈 **早期热度**：{'｜'.join(early_parts)}")
             quotes = g.get("quotes", [])
             for q in quotes[:1]:
                 q_text = q.get("quote_text", "")
@@ -544,6 +565,130 @@ def log_play(appid: int, status: Literal["played", "avoided", "wishlist"], note:
     }
 
 
+def _demo_radar_markdown(items: list[dict], max_age_days: int | None, horror: str, players: int | None, mode: str, tag: str | None = None, widened: bool = False) -> str:
+    mode_label = {"online": "在线合作", "local": "本地合作", "any": "在线/本地"}.get(mode, mode)
+    conds = [f"近{max_age_days}天" if max_age_days and not widened else "全周期潜力试玩", mode_label]
+    if players:
+        conds.append(f"{players}人")
+    if horror and horror != "any":
+        conds.append(horror)
+    if tag:
+        conds.append(tag)
+    lines = [f"**🧪 潜力新 Demo 雷达（小而美 / 刚出试玩）**（{'｜'.join(conds)}）", ""]
+    if not items:
+        lines.append("当前筛选条件下暂无新上架的高潜力 Demo，试试放宽人数或恐怖条件。")
+        return "\n".join(lines)
+    for i, g in enumerate(items, 1):
+        age = g.get("release_age_days")
+        age_str = f"上线 {age} 天" if age is not None else ("热门愿望单试玩" if g.get("has_demo") else "新试玩")
+        players_str = f"支持 {g['max_players']} 人" if g.get("max_players") else "联机合作"
+        score_str = f"潜力分 {float(g.get('potential_score') or 0):.1f}"
+        lines.append(f"{i}. **《{g['name']}》** — 免费试玩 | {age_str} | {players_str} | {score_str}")
+        signal_parts: list[str] = []
+        ccu = int(g.get("current_players") or 0)
+        fol = int(g.get("followers") or 0)
+        news = int(g.get("recent_news_count") or 0)
+        if ccu > 0:
+            signal_parts.append(f"当前在线 {ccu} 人")
+        if fol > 0:
+            est_low = fol * 7
+            est_high = fol * 12
+            if est_low >= 1000:
+                signal_parts.append(f"本体关注 {fol} 人（估约 {est_low / 1000:.1f}k–{est_high / 1000:.1f}k 愿望单）")
+            else:
+                signal_parts.append(f"本体关注 {fol} 人")
+        if news > 0:
+            signal_parts.append(f"近14天更新/公告 {news} 次")
+        if g.get("total_reviews"):
+            signal_parts.append(f"已有 {g['total_reviews']} 篇评测（{float(g.get('positive_pct') or 0):.0f}%好评）")
+        if signal_parts:
+            lines.append(f"   - 📈 **早期动能**：{'｜'.join(signal_parts)}")
+        polish_parts: list[str] = []
+        if g.get("has_schinese"):
+            polish_parts.append("支持简中")
+        if g.get("has_trailer"):
+            polish_parts.append("含实机预告片")
+        if g.get("has_ai_disclosure"):
+            polish_parts.append("⚠️ 含 AI 内容披露")
+        if polish_parts:
+            lines.append(f"   - ✨ **质感**：{'｜'.join(polish_parts)}")
+        if g.get("short_desc"):
+            lines.append(f"   - 🎯 **玩法设定**：{g['short_desc']}")
+        target_id = g.get("demo_appid") or g["appid"]
+        lines.append(f"   - 🔗 [前往 Steam 试玩](https://store.steampowered.com/app/{target_id}/)")
+    return "\n".join(lines)
+
+
+def discover_potential_demos(
+    max_age_days: int = 14,
+    horror: Literal["none", "mild", "scary", "any"] = "any",
+    players: Optional[int] = None,
+    mode: Literal["online", "local", "any"] = "online",
+    tag: Optional[str] = None,
+    min_score: float = 8.0,
+    limit: int = 8,
+) -> dict:
+    """发现刚上线（1–14天）或处于试玩阶段的高潜力小而美 Demo，按实时在线/本体关注/活跃更新综合排序。"""
+    log = _load_log()
+    excluded = _excluded(log)
+    conn = _open_snapshot()
+    if conn is None:
+        return {
+            "status": "empty_snapshot",
+            "message": "本地游戏快照不存在或无法读取，请等待 GitHub Actions 生成 data/games.sqlite。",
+            "items": [],
+            "markdown_preview": "",
+        }
+    try:
+        rows = db.recommend_potential_demos(
+            conn,
+            max_age_days=max_age_days,
+            horror=horror,
+            players=players,
+            mode=mode,
+            tag=tag,
+            min_score=min_score,
+            limit=max(limit * 2, 20),
+        )
+        widened = False
+        rows = [r for r in rows if int(r.get("appid", 0)) not in excluded]
+        if not rows:
+            widened = True
+            rows = db.recommend_potential_demos(
+                conn,
+                max_age_days=None,
+                horror=horror,
+                players=players,
+                mode=mode,
+                tag=tag,
+                min_score=0.0,
+                limit=max(limit * 2, 20),
+            )
+            rows = [r for r in rows if int(r.get("appid", 0)) not in excluded]
+        items = [_format_game(r, conn) for r in rows[: max(1, int(limit))]]
+        return {
+            "status": "ok",
+            "items": items,
+            "query": {
+                "max_age_days": max_age_days,
+                "horror": horror,
+                "players": players,
+                "mode": mode,
+                "tag": tag,
+                "min_score": min_score,
+            },
+            "meta": {
+                "source": "snapshot",
+                "count": len(items),
+                "widened": widened,
+                "excluded_appids": sorted(excluded),
+            },
+            "markdown_preview": _demo_radar_markdown(items, max_age_days, horror, players, mode, tag=tag, widened=widened),
+        }
+    finally:
+        conn.close()
+
+
 def tonight_playbook() -> str:
     return (
         "请最多用一轮回复询问四个问题：人数、恐怖接受度、预算（免费/Demo、50元以内或不限）和游玩时长（如有偏好类型如独立/生存也可一并传入 tag）；"
@@ -553,6 +698,7 @@ def tonight_playbook() -> str:
 
 if mcp is not None:
     recommend_coop_games = mcp.tool()(recommend_coop_games)
+    discover_potential_demos = mcp.tool()(discover_potential_demos)
     get_game_card = mcp.tool()(get_game_card)
     resolve_game = mcp.tool()(resolve_game)
     log_play = mcp.tool()(log_play)

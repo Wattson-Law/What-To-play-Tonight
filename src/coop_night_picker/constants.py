@@ -82,6 +82,40 @@ FRIENDSLOP_FEEDS = [
     {"name": "Steam物理互坑·热门试玩Demo榜", "category1": 10, "category3": 38, "tags": "3968"},
 ]
 
+# Early-stage Demo Radar feeds: catch 1-7 day old co-op Demos BEFORE crowdsourced tags/reviews accumulate
+DEMO_RADAR_FEEDS = [
+    {"name": "Steam最新联机Demo·发售倒序", "category1": 10, "category3": 38, "sort_by": "Released_DESC"},
+    {"name": "Steam热门联机Demo榜", "category1": 10, "category3": 38},
+    {"name": "Steam独立联机Demo·最新上架", "category1": 10, "tags": "3843,492", "sort_by": "Released_DESC"},
+]
+
+# High-signal indie publishers/developers known for quirky/high-craft indie & co-op games
+INDIE_PUBLISHER_WHITELIST = {
+    "landfall",
+    "landfall publishing",
+    "devolver digital",
+    "aggro crab",
+    "gamera games",
+    "spiral up games",
+    "hooded horse",
+    "another indie",
+    "innersloth",
+    "tinybuild",
+    "coffee stain publishing",
+    "team17",
+    "kepler interactive",
+    "raw fury",
+    "indie.io",
+    "playism",
+    "indieark",
+    "2p games",
+    "thermite games",
+    "lightning games",
+    "annapurna interactive",
+    "poncle",
+    "semiwork",
+}
+
 CURATOR_SOURCES = [
     {"clanid": 6859276, "name": "Co-Optimus", "focus": "全球联机合作游戏垂直权威"},
     {"clanid": 29519836, "name": "UP鉴游组", "focus": "独立与联机好游发掘"},

@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parents[1] / "src"))
@@ -10,6 +11,7 @@ sys.path.insert(0, str(Path(__file__).parents[1] / "src"))
 from coop_night_picker.constants import (
     CATEGORY_ZH,
     CURATOR_SOURCES,
+    DEMO_RADAR_FEEDS,
     FRIENDSLOP_FEEDS,
     QUIRKY_TAG_IDS,
     REVIEW_TIERS,
@@ -18,12 +20,14 @@ from coop_night_picker.constants import (
 from coop_night_picker.db import init_db, insert_quote, is_playable_game, upsert_game
 from coop_night_picker.extractor import (
     build_avoid_reasons,
+    compute_potential_score,
     derive_review_summary,
     extract_quotes,
     infer_max_players,
     parse_appdetails,
     parse_appreviews,
     parse_curator_recommendations,
+    parse_release_age_days,
     parse_search_html,
     parse_store_page,
 )
@@ -52,6 +56,8 @@ def main(argv=None):
     conn = init_db(args.db)
     merged: dict[int, dict] = {}
     curator_map: dict[int, list[dict]] = {}
+    radar_ids: set[int] = set()
+    wishlist_ids: set[int] = set()
     root = Path(args.offline_fixture) if args.offline_fixture else None
     client = SteamClient()
 
@@ -100,12 +106,20 @@ def main(argv=None):
         # 0. Top priority: Automated 4-channel Friendslop / Quirky Co-op & Popular Wishlist feeds
         for idx, feed in enumerate(FRIENDSLOP_FEEDS, 1):
             feed_params = {k: v for k, v in feed.items() if k != "name"}
+            is_wishlist_feed = feed.get("filter") == "popularwishlist"
+            is_demo_feed = feed.get("category1") == 10
             for item in _items(client.store_search("", count=min(50, max(30, args.limit)), **feed_params)):
                 aid = int(item["appid"])
+                if is_wishlist_feed:
+                    wishlist_ids.add(aid)
+                if is_demo_feed:
+                    radar_ids.add(aid)
                 if aid not in merged:
                     merged[aid] = dict(item)
                 else:
                     merged[aid]["tag_ids"] = sorted(set(merged[aid].get("tag_ids", [])) | set(item.get("tag_ids", [])))
+                    if not merged[aid].get("release_date_text") and item.get("release_date_text"):
+                        merged[aid]["release_date_text"] = item["release_date_text"]
                 curator_map.setdefault(aid, []).append(
                     {
                         "appid": aid,
@@ -120,6 +134,19 @@ def main(argv=None):
                         "review_url": f"https://store.steampowered.com/app/{aid}/",
                     }
                 )
+
+        # 0.5 Early-Stage Demo Radar feeds: catch 1-7 day old co-op Demos BEFORE crowdsourced tags exist
+        for feed in DEMO_RADAR_FEEDS:
+            feed_params = {k: v for k, v in feed.items() if k != "name"}
+            for item in _items(client.store_search("", count=30, **feed_params)):
+                aid = int(item["appid"])
+                radar_ids.add(aid)
+                if aid not in merged:
+                    merged[aid] = dict(item)
+                else:
+                    merged[aid]["tag_ids"] = sorted(set(merged[aid].get("tag_ids", [])) | set(item.get("tag_ids", [])))
+                    if not merged[aid].get("release_date_text") and item.get("release_date_text"):
+                        merged[aid]["release_date_text"] = item["release_date_text"]
 
         # 1. Human Curator recommendations (Co-op, Online Co-op)
         for curator in CURATOR_SOURCES:
@@ -154,7 +181,8 @@ def main(argv=None):
                 else:
                     merged[aid]["tag_ids"] = sorted(set(merged[aid].get("tag_ids", [])) | set(item.get("tag_ids", [])))
 
-    # Order candidates so quirky/Friendslop & multi-curator Picks come first
+    # Order candidates so quirky/Friendslop & multi-curator Picks come first,
+    # and reserve a dedicated Demo Radar slice for fresh high-potential Demos.
     ordered_candidates = sorted(
         merged.items(),
         key=lambda kv: (
@@ -164,9 +192,23 @@ def main(argv=None):
         ),
         reverse=True,
     ) if not root else list(merged.items())
-    # Inspect beyond args.limit so skipping unplayable coming-soon titles still fills the snapshot.
-    candidate_pool = ordered_candidates[: max(args.limit * 2, args.limit + 60)] if not root else ordered_candidates[: args.limit]
+    radar_quota = min(30, max(10, args.limit // 6)) if (not root and args.limit >= 50) else 0
+    main_limit = args.limit - radar_quota
+    main_pool = ordered_candidates[: max(main_limit * 2, main_limit + 60)] if not root else ordered_candidates[: args.limit]
+    radar_only_pool = (
+        sorted(
+            [(aid, merged[aid]) for aid in radar_ids if aid in merged],
+            key=lambda kv: (
+                int(parse_release_age_days(kv[1].get("release_date_text")) is not None and (parse_release_age_days(kv[1].get("release_date_text")) or 999) <= 14),
+                kv[0],
+            ),
+            reverse=True,
+        )[:45]
+        if radar_quota > 0
+        else []
+    )
     kept_ids: list[int] = []
+    processed_ids: set[int] = set()
 
     def fixture(appid, kind):
         if not root:
@@ -182,9 +224,10 @@ def main(argv=None):
                 return path.read_text(encoding="utf8")
         return None
 
-    for appid, seed in candidate_pool:
-        if len(kept_ids) >= args.limit:
-            break
+    def _enrich_and_persist(appid: int, seed: dict, *, is_radar_slice: bool = False) -> bool:
+        if appid in processed_ids:
+            return False
+        processed_ids.add(appid)
         game = dict(seed.get("game", seed))
         game["appid"] = appid
         seed_tag_ids = set(seed.get("tag_ids", []))
@@ -218,10 +261,11 @@ def main(argv=None):
 
         # Skip unreleased games that have neither a free release nor a downloadable demo
         if game.get("coming_soon") and not game.get("is_free") and not game["has_demo"]:
-            continue
+            return False
 
         store_raw = fixture(appid, "store") or fixture(appid, "store_page")
         page = parse_store_page(store_raw or (client.store_page(appid) if not root else ""))
+        game["has_ai_disclosure"] = int(page.get("has_ai_disclosure", 0))
         tags = page["tags"]
         tag_ids = {tag["id"] for tag in tags}
         all_tag_ids = tag_ids | seed_tag_ids
@@ -257,7 +301,7 @@ def main(argv=None):
         )
         game["online_coop"] = int(
             not explicit_single_only
-            and bool({9, 38} & category_ids or {1685, 3843, 4508} & all_tag_ids or "在线合作" in category_names or c_entries)
+            and bool({9, 38} & category_ids or {1685, 3843, 4508} & all_tag_ids or "在线合作" in category_names or c_entries or is_radar_slice)
         )
         game["local_coop"] = int(
             bool(
@@ -302,7 +346,59 @@ def main(argv=None):
 
         # Final playability check: exclude titles that cannot be downloaded/played tonight
         if not is_playable_game(game):
-            continue
+            return False
+
+        # Early Demo Radar enrichment (CCU on Demo, followers & recent devlogs on fullgame)
+        raw_rel = game.get("release_date")
+        if isinstance(raw_rel, dict):
+            raw_rel = raw_rel.get("date")
+        release_str = str(raw_rel or seed.get("release_date_text") or "").strip()
+        game["release_date"] = release_str
+        age_days = parse_release_age_days(release_str)
+        game["release_age_days"] = age_days
+
+        is_demo_candidate = bool(game["has_demo"]) or game.get("type") == "demo" or appid in radar_ids
+        early_raw = fixture(appid, "early")
+        ccu = 0
+        followers = 0
+        recent_news = 0
+        if early_raw:
+            early_obj = json.loads(early_raw)
+            ccu = int(early_obj.get("current_players") or 0)
+            followers = int(early_obj.get("followers") or 0)
+            recent_news = int(early_obj.get("recent_news_count") or 0)
+        elif not root and is_demo_candidate:
+            ccu_target = int(game["demo_appid"]) if game.get("demo_appid") else appid
+            hub_target = int(game["fullgame_appid"]) if game.get("fullgame_appid") else appid
+            ccu = int(client.current_players(ccu_target) or 0)
+            followers = int(client.community_followers(hub_target) or 0)
+            news_items = client.app_news(hub_target, count=5)
+            cutoff_ts = time.time() - 14 * 86400
+            recent_news = sum(1 for item in news_items if float(item.get("date") or 0) >= cutoff_ts)
+
+        potential_score = compute_potential_score(
+            current_players=ccu,
+            followers=followers,
+            age_days=age_days,
+            recent_news_count=recent_news,
+            has_schinese=game.get("has_schinese", 0),
+            has_trailer=game.get("has_trailer", 0),
+            has_ai_disclosure=game.get("has_ai_disclosure", 0),
+            total_reviews=game.get("total_reviews", 0),
+            positive_pct=game.get("positive_pct", 0.0),
+            developers=game.get("developers_json") or [],
+            publishers=game.get("publishers_json") or [],
+            from_wishlist=appid in wishlist_ids,
+        )
+        game["current_players"] = ccu
+        game["followers"] = followers
+        game["recent_news_count"] = recent_news
+        game["potential_score"] = potential_score
+        game["is_demo_radar"] = int(is_demo_candidate)
+
+        # For the dedicated radar slice, drop zero-traction noise Demos so only real gems take quota
+        if is_radar_slice and potential_score < 6.0 and int(game.get("total_reviews") or 0) < 5:
+            return False
 
         positive_reviews = []
         negative_reviews = []
@@ -396,6 +492,25 @@ def main(argv=None):
                     if quote.get("review_url", "").startswith("https://steamcommunity.com/profiles/"):
                         quote["appid"] = appid
                         insert_quote(conn, quote)
+        return True
+
+    for appid, seed in main_pool:
+        if len(kept_ids) >= main_limit:
+            break
+        _enrich_and_persist(appid, seed, is_radar_slice=False)
+
+    radar_added = 0
+    for appid, seed in radar_only_pool:
+        if radar_added >= radar_quota or len(kept_ids) >= args.limit:
+            break
+        if _enrich_and_persist(appid, seed, is_radar_slice=True):
+            radar_added += 1
+
+    # Fill any remaining unused radar quota from main_pool if needed
+    for appid, seed in main_pool:
+        if len(kept_ids) >= args.limit:
+            break
+        _enrich_and_persist(appid, seed, is_radar_slice=False)
 
     if not args.dry_run and kept_ids:
         placeholders = ",".join("?" for _ in kept_ids)
@@ -405,7 +520,7 @@ def main(argv=None):
 
     processed = len(kept_ids)
     conn.close()
-    print(f"processed {processed} games; db={args.db}; dry_run={args.dry_run}")
+    print(f"processed {processed} games (radar_slice={radar_added}); db={args.db}; dry_run={args.dry_run}")
     return 0
 
 

@@ -20,6 +20,10 @@ PENDING_TTL_SECONDS = 600.0
 _HORROR_NEG_RE = re.compile(r"(?:不|别|勿|不要|不想|怕|拒绝|非)[^，。,！!？?\n]{0,4}(?:恐怖|吓人|惊悚)")
 _PAID_NOT_FREE_RE = re.compile(r"(?:不要免费|不玩免费|别免费|非免费|付费|买断|花钱)")
 _PRICE_CAP_RE = re.compile(r"(\d{1,4})\s*(?:元|块|rmb)?\s*(?:以内|以下|内|左右)")
+_POTENTIAL_DEMO_RE = re.compile(
+    r"(?:潜力\s*(?:demo|试玩|新游|小游戏)|小而美|新\s*demo|最新\s*demo|刚出.{0,6}(?:demo|试玩)|demo\s*雷达|新试玩|挖宝)",
+    re.I,
+)
 
 
 def _coerce_players(value: Any, default: int = 4) -> int:
@@ -174,6 +178,11 @@ def parse_intent_from_text(text: str, defaults: dict[str, Any] | None = None) ->
     elif any(w in cleaned for w in ("通宵", "不限时", "长期")):
         params["session_duration"] = "long"
 
+    if _POTENTIAL_DEMO_RE.search(cleaned):
+        if params.get("tag") == "demo":
+            params.pop("tag", None)
+        return {"action": "potential_demos", "params": params}
+
     core_filled = sum(1 for key in ("players", "horror", "budget") if params.get(key) not in (None, ""))
     has_trigger = any(w in cleaned for w in ("推荐", "玩什么", "玩啥", "来个", "有什么"))
     enough = core_filled >= 2 and (has_trigger or m_players or defaults is not None or core_filled >= 3)
@@ -254,6 +263,12 @@ class KookBotSession:
             "推荐",
             "有什么好玩",
             "联机游戏",
+            "潜力",
+            "小而美",
+            "新demo",
+            "新试玩",
+            "demo雷达",
+            "挖宝",
             "说话",
             "在吗",
             "/start",
@@ -263,7 +278,8 @@ class KookBotSession:
             "玩过",
             "避雷",
         )
-        if not is_mentioned and not in_pending and not any(w in stripped for w in trigger_words):
+        low_stripped = stripped.lower()
+        if not is_mentioned and not in_pending and not any(w in low_stripped for w in trigger_words):
             return None
         # Cooldown only guards unsolicited spam; while a dialog is open the user is answering us.
         if not in_pending and now - self.last_reply_at.get(channel_id, 0.0) < self.cooldown_sec:
@@ -312,6 +328,23 @@ class KookBotSession:
             server.log_play(intent["appid"], intent["status"])
             label = {"played": "已玩过（后续自动排除）", "avoided": "已避雷（后续自动排除）", "wishlist": "想玩清单"}[intent["status"]]
             return f"✅ 已记录 AppID `{intent['appid']}` 为 **{label}**！"
+
+        if intent["action"] == "potential_demos":
+            self.pending_channels.pop(channel_id, None)
+            self.pending_since.pop(channel_id, None)
+            self.last_reply_at[channel_id] = now
+            p = intent.get("params") or {}
+            res = server.discover_potential_demos(
+                max_age_days=14,
+                horror=p.get("horror", "any"),
+                players=_coerce_players(p.get("players"), 0) if p.get("players") else None,
+                mode=p.get("mode", "online"),
+                tag=p.get("tag"),
+                limit=6,
+            )
+            if res.get("status") != "ok" or not res.get("markdown_preview"):
+                return "当前筛选条件下暂无潜力新 Demo，试试直接发送 `@我 潜力demo` 查看全部！"
+            return res["markdown_preview"]
 
         if intent["action"] == "ask":
             llm_guess = call_llm_for_params(stripped)

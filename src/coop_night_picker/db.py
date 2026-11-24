@@ -37,7 +37,19 @@ SCHEMA = """CREATE TABLE IF NOT EXISTS games (
     updated_at TEXT,
     curator_count INTEGER DEFAULT 0,
     curators_json TEXT,
-    coming_soon INTEGER DEFAULT 0
+    coming_soon INTEGER DEFAULT 0,
+    release_date TEXT,
+    release_age_days INTEGER,
+    current_players INTEGER DEFAULT 0,
+    followers INTEGER DEFAULT 0,
+    recent_news_count INTEGER DEFAULT 0,
+    has_schinese INTEGER DEFAULT 0,
+    has_trailer INTEGER DEFAULT 0,
+    has_ai_disclosure INTEGER DEFAULT 0,
+    developers_json TEXT,
+    publishers_json TEXT,
+    potential_score REAL DEFAULT 0.0,
+    is_demo_radar INTEGER DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS game_quotes (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -54,7 +66,15 @@ CREATE TABLE IF NOT EXISTS game_quotes (
 CREATE INDEX IF NOT EXISTS idx_games_filter ON games(online_coop,horror_level,is_free,has_demo,review_score DESC);
 CREATE INDEX IF NOT EXISTS idx_quotes_appid ON game_quotes(appid,voted_up);"""
 
-JSON_FIELDS = {"categories_json", "tags_json", "avoid_reasons_json", "dimensions_json", "curators_json"}
+JSON_FIELDS = {
+    "categories_json",
+    "tags_json",
+    "avoid_reasons_json",
+    "dimensions_json",
+    "curators_json",
+    "developers_json",
+    "publishers_json",
+}
 
 
 def connect(path: str | Path = "data/games.sqlite") -> sqlite3.Connection:
@@ -71,12 +91,26 @@ def init_db(conn_or_path):
     c.row_factory = sqlite3.Row
     c.executescript(SCHEMA)
     existing_cols = {r[1] for r in c.execute("PRAGMA table_info(games)")}
-    if "curator_count" not in existing_cols:
-        c.execute("ALTER TABLE games ADD COLUMN curator_count INTEGER DEFAULT 0")
-    if "curators_json" not in existing_cols:
-        c.execute("ALTER TABLE games ADD COLUMN curators_json TEXT")
-    if "coming_soon" not in existing_cols:
-        c.execute("ALTER TABLE games ADD COLUMN coming_soon INTEGER DEFAULT 0")
+    migrations = [
+        ("curator_count", "INTEGER DEFAULT 0"),
+        ("curators_json", "TEXT"),
+        ("coming_soon", "INTEGER DEFAULT 0"),
+        ("release_date", "TEXT"),
+        ("release_age_days", "INTEGER"),
+        ("current_players", "INTEGER DEFAULT 0"),
+        ("followers", "INTEGER DEFAULT 0"),
+        ("recent_news_count", "INTEGER DEFAULT 0"),
+        ("has_schinese", "INTEGER DEFAULT 0"),
+        ("has_trailer", "INTEGER DEFAULT 0"),
+        ("has_ai_disclosure", "INTEGER DEFAULT 0"),
+        ("developers_json", "TEXT"),
+        ("publishers_json", "TEXT"),
+        ("potential_score", "REAL DEFAULT 0.0"),
+        ("is_demo_radar", "INTEGER DEFAULT 0"),
+    ]
+    for col_name, col_def in migrations:
+        if col_name not in existing_cols:
+            c.execute(f"ALTER TABLE games ADD COLUMN {col_name} {col_def}")
     c.commit()
     return c
 
@@ -211,9 +245,52 @@ def recommend_games(conn, *, horror="any", budget="any", players=None, mode="onl
     sql += (
         " ORDER BY CASE WHEN curators_json LIKE '%Steam%' THEN 2"
         " WHEN tags_json LIKE '%欢乐%' OR tags_json LIKE '%喜剧%' OR tags_json LIKE '%物理%' OR tags_json LIKE '%派对%' THEN 1 ELSE 0 END DESC,"
-        " COALESCE(curator_count, 0) DESC, review_score DESC, positive_pct DESC LIMIT ?"
+        " COALESCE(curator_count, 0) DESC, review_score DESC, COALESCE(potential_score, 0) DESC, positive_pct DESC LIMIT ?"
     )
     args.append(max(limit * 4, 200) if tag else limit)
+    rows = [_decode(r) for r in conn.execute(sql, args)]
+    if tag:
+        rows = [r for r in rows if _matches_tag(r, tag)]
+    return rows[:limit]
+
+
+def recommend_potential_demos(
+    conn,
+    *,
+    max_age_days: int | None = 14,
+    horror: str = "any",
+    players: int | None = None,
+    mode: str = "online",
+    tag: str | None = None,
+    min_score: float = 8.0,
+    limit: int = 10,
+):
+    """Return high-potential recent/indie playable Demos ranked by early traction & polish score."""
+    sql = (
+        f"SELECT * FROM games WHERE is_avoid=0 AND (has_demo=1 OR type='demo') AND {PLAYABLE_SQL}"
+        " AND COALESCE(potential_score, 0) >= ?"
+    )
+    args: list = [float(min_score)]
+    if max_age_days is not None:
+        sql += " AND (release_age_days IS NULL OR release_age_days <= ?)"
+        args.append(int(max_age_days))
+    if horror in {"none", "mild", "scary"}:
+        sql += " AND horror_level=?"
+        args.append(horror)
+    if players:
+        sql += " AND (max_players IS NULL OR max_players>=?)"
+        args.append(int(players))
+    if mode == "online":
+        sql += " AND online_coop=1"
+    elif mode == "local":
+        sql += " AND local_coop=1"
+    sql += (
+        " ORDER BY COALESCE(potential_score, 0) DESC,"
+        " COALESCE(current_players, 0) DESC,"
+        " COALESCE(followers, 0) DESC,"
+        " review_score DESC LIMIT ?"
+    )
+    args.append(max(limit * 4, 100) if tag else limit)
     rows = [_decode(r) for r in conn.execute(sql, args)]
     if tag:
         rows = [r for r in rows if _matches_tag(r, tag)]

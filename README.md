@@ -9,6 +9,7 @@
 | 来源 | 作用 | 实现 |
 |---|---|---|
 | 8 条 Friendslop 检索式 | 零人工干预捞“妖精搞笑”联机小游戏 | `constants.FRIENDSLOP_FEEDS`：常见公式 = `3843 在线合作` + (`4136 欢乐` / `1719 喜剧` / `3968 物理` / `7178 派对`)，外加 `filter=popularwishlist`、`sort_by=Released_DESC`、`category1=10&category3=38`（Demo 榜） |
+| 3 条每日新 Demo 雷达 | 发现上线 1–7 天、尚未出评的“小而美”潜力 Demo | `constants.DEMO_RADAR_FEEDS`（`Released_DESC` 最新联机 Demo）+ 实时在线人数 `GetNumberOfCurrentPlayers` + 本体社区关注数 `memberslistxml` + 近 14 天开发日志 `GetNewsForApp` + 简中/预告片/AI 披露质感打分 |
 | 8 位鉴赏家 | 人类买手背书 + 锐评原话 | `constants.CURATOR_SOURCES`：小黑盒盒娘后援会、中国鉴赏家同好会、游饼、中国玩家鉴赏组、UP鉴游组、好玩✔Fun、CowLevel.Net、Co-Optimus |
 | Steam `appdetails` | 价格 / 分类 / 支持人数 / 简介 | `steam_client.get_appdetails`（官方站 → `steamstore-a.akamaihd.net` 回退，不跟 30x） |
 | Steam 商店页 + `appreviews` | 标签、全语言/简中好评率、玩家原话 | `extractor` 解析 `InitAppTagModal`、`data-featuretarget="appreviews"`、评测 JSON；评测 302 时降级为「仅商店元数据」 |
@@ -21,11 +22,11 @@
 ## 二、云端流水线（GitHub Actions，零本地维护）
 
 ```
-push / 每周一 03:17 UTC / 手动 Run workflow
+push / 每日 03:17 UTC（北京时间 11:17）/ 手动 Run workflow
    ↓  .github/workflows/update_snapshot.yml
-build_snapshot.py --limit --with-reviews   →  data/games.sqlite
-verify_snapshot.py                          →  结构 / 档位 / 引文子串校验
-git commit data/games.sqlite [skip ci]      →  main（先 pull --rebase -X theirs 再推）
+build_snapshot.py --limit 180 --with-reviews →  data/games.sqlite（含 30 个潜力新 Demo 雷达名额）
+verify_snapshot.py                           →  结构 / 档位 / 引文子串校验
+git commit data/games.sqlite [skip ci]       →  main（先 pull --rebase -X theirs 再推）
 ```
 
 当前快照：150 款游戏、182 条引文，7/7 目标妖精小游戏（逢考弊过、Dear Passengers、潜艇菜鸟团、Fart Together、PeeVPee、SCAM Line、青蛙小队）全部自动命中。
@@ -34,7 +35,8 @@ git commit data/games.sqlite [skip ci]      →  main（先 pull --rebase -X the
 
 `python -m coop_night_picker.server`（FastMCP）
 
-- `recommend_coop_games(horror, budget, players, mode, tag, confirmed, limit_per_tier)`：按 9 档评价分组 + 避雷榜 + Markdown 预览；`confirmed=false` 时返回一次性追问。
+- `recommend_coop_games(horror, budget, players, mode, tag, confirmed, limit_per_tier)`：按 9 档评价分组 + 避雷榜 + Markdown 预览；`confirmed=false` 时返回一次性追问（自动过滤不可下载游玩的未发售游戏）。
+- `discover_potential_demos(max_age_days, horror, players, mode, tag, min_score, limit)`：发现上线 1–14 天或试玩阶段的高潜力小而美 Demo，附实时在线人数、本体关注数、近 14 天更新次数与质感标记。
 - `get_game_card(appid, include_quotes)`：全语言/简中双轨好评率、鉴赏家背书名单、正负引文、避雷原因。
 - `resolve_game(query, limit)`：先本地 SQLite，不足再打 Steam 搜索。
 - `log_play(appid, status, note)`：`played` / `avoided` / `wishlist`，前两者自动从后续推荐里排除。
@@ -49,7 +51,7 @@ git commit data/games.sqlite [skip ci]      →  main（先 pull --rebase -X the
 - **在线策略**：cron 每小时触发、`cancel-in-progress: false` 排队串行，每次跑 5h17m（`KOOK_MAX_RUNTIME_SECONDS=19000`），前一次结束下一次立刻接棒 → 24/7；`push` 到 `main` 也会立刻拉起一轮。
 - **触发**：`@机器人`、角色提及 `(rol)...`、或裸说 `今晚玩啥 / 玩什么 / 推荐 / 联机游戏`。
 - **对话**：条件不足时只追问缺的字段（人数/恐怖接受度/预算），补齐后直接出结果；`4人 不恐怖 50以内` 这种一句带全的直接推荐。
-- **其它指令**：`搜 <名字>`、`详情 <appid>`、`玩过/避雷 <appid>`。
+- **其它指令**：`潜力demo / 小而美`（直接出潜力新 Demo 雷达）、`搜 <名字>`、`详情 <appid>`、`玩过/避雷 <appid>`。
 - **可靠性**：回复按 1800 字符分片发送（KOOK 有长度上限，之前 3979 字的整条回复会被拒收且无报错）；跳过 15 分钟以上的旧消息，重启不会补答昨晚的聊天；每片打印 `http=/code=/len=` 便于排查。
 - **密钥**：`KOOK_TOKEN`（Actions Secret，Libsodium SealedBox 加密上传）；可选 `LLM_API_KEY`/`LLM_BASE_URL`/`LLM_MODEL`，缺省用 `GITHUB_TOKEN` 打 GitHub Models 做兜底语义解析。
 
