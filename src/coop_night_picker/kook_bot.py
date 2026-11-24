@@ -85,10 +85,31 @@ _TAG_KEYWORDS = {
 }
 
 
-def parse_intent_from_text(text: str, defaults: dict[str, Any] | None = None) -> dict[str, Any]:
+_BOT_DISPLAY_MENTION_RE = re.compile(r"@What\s+to\s+play\b", re.I)
+_UNMENTIONED_CMD_RE = re.compile(
+    r"(?:今晚玩什么|今晚玩啥|开黑玩什么|开黑玩啥|推荐联机|推荐个联机|联机游戏推荐|"
+    r"潜力\s*(?:demo|试玩|新游|小游戏)|小而美|新\s*demo|最新\s*demo|demo\s*雷达|新试玩|挖宝|"
+    r"^/(?:start|help)\b|^搜\s+\S+|^详情\s*\d{3,10}\b|^(?:玩过|避雷|拉黑|想玩)\s*\d{3,10}\b)",
+    re.I,
+)
+_BARE_GREETINGS = {"今晚玩什么", "今晚玩啥", "玩什么", "玩啥", "推荐", "在吗", "说话", "/start", "/help", "你好", "hi", "hello"}
+_VALID_HORROR = {"none", "mild", "scary", "any"}
+_VALID_BUDGET = {"free_or_demo", "under_50", "any_paid", "any"}
+_VALID_MODE = {"online", "local", "any"}
+
+
+def _strip_mentions(text: str, bot_name: str | None = None) -> str:
+    cleaned = re.sub(r"\((?:met|rol)\)\d+\((?:met|rol)\)", " ", text or "")
+    if bot_name:
+        cleaned = re.sub(rf"@{re.escape(bot_name)}\b", " ", cleaned, flags=re.I)
+    cleaned = _BOT_DISPLAY_MENTION_RE.sub(" ", cleaned)
+    cleaned = re.sub(r"@\S+", " ", cleaned)
+    return " ".join(cleaned.split()).strip()
+
+
+def parse_intent_from_text(text: str, defaults: dict[str, Any] | None = None, bot_name: str | None = None) -> dict[str, Any]:
     """Deterministically parse KOOK user message into tool intent & parameters."""
-    cleaned = re.sub(r"\((?:met|rol)\)\d+\((?:met|rol)\)", " ", text or "").strip()
-    cleaned = re.sub(r"@\S+", " ", cleaned).strip()
+    cleaned = _strip_mentions(text, bot_name=bot_name)
     low = cleaned.lower()
 
     m_card = re.search(r"(?:详情|卡片|card)\s*(\d{3,10})", low)
@@ -119,7 +140,7 @@ def parse_intent_from_text(text: str, defaults: dict[str, Any] | None = None) ->
         params["players"] = 2
     elif "三人" in cleaned:
         params["players"] = 3
-    elif "四人" in cleaned or "开黑" in cleaned:
+    elif "四人" in cleaned:
         params.setdefault("players", 4)
     elif "五人以上" in cleaned or "五个人以上" in cleaned:
         params.setdefault("players", 5)
@@ -239,12 +260,13 @@ def call_llm_for_params(user_text: str) -> dict[str, Any] | None:
 class KookBotSession:
     """Stateful KOOK channel coordinator with rate limiting."""
 
-    def __init__(self, cooldown_sec: float = 1.5, pending_ttl_sec: float = PENDING_TTL_SECONDS):
+    def __init__(self, cooldown_sec: float = 1.5, pending_ttl_sec: float = PENDING_TTL_SECONDS, bot_name: str | None = None):
         self.pending_channels: dict[str, dict[str, Any]] = {}
         self.pending_since: dict[str, float] = {}
         self.last_reply_at: dict[str, float] = {}
         self.cooldown_sec = cooldown_sec
         self.pending_ttl_sec = pending_ttl_sec
+        self.bot_name = bot_name
 
     def handle_message(self, channel_id: str, text: str, is_mentioned: bool = True) -> str | None:
         now = time.time()
@@ -255,33 +277,9 @@ class KookBotSession:
                 self.pending_since.pop(channel_id, None)
         in_pending = channel_id in self.pending_channels
         stripped = (text or "").strip()
-        if re.search(r"\((?:met|rol)\)\d+\((?:met|rol)\)", stripped):
+        if re.search(r"\((?:met|rol)\)\d+\((?:met|rol)\)", stripped) or _BOT_DISPLAY_MENTION_RE.search(stripped):
             is_mentioned = True
-        trigger_words = (
-            "今晚玩什么",
-            "今晚玩啥",
-            "玩什么",
-            "玩啥",
-            "推荐",
-            "有什么好玩",
-            "联机游戏",
-            "潜力",
-            "小而美",
-            "新demo",
-            "新试玩",
-            "demo雷达",
-            "挖宝",
-            "说话",
-            "在吗",
-            "/start",
-            "/help",
-            "搜 ",
-            "详情",
-            "玩过",
-            "避雷",
-        )
-        low_stripped = stripped.lower()
-        if not is_mentioned and not in_pending and not any(w in low_stripped for w in trigger_words):
+        if not is_mentioned and not in_pending and not _UNMENTIONED_CMD_RE.search(stripped):
             return None
         # Cooldown only guards unsolicited spam; while a dialog is open the user is answering us.
         if not in_pending and now - self.last_reply_at.get(channel_id, 0.0) < self.cooldown_sec:
@@ -289,30 +287,52 @@ class KookBotSession:
 
         # Fresh @mention starts a clean query instead of leaking stale filters from an earlier dialog.
         prior = None if is_mentioned else self.pending_channels.get(channel_id)
-        intent = parse_intent_from_text(stripped, defaults=prior)
+        intent = parse_intent_from_text(stripped, defaults=prior, bot_name=self.bot_name)
 
         if intent["action"] == "card":
             self.last_reply_at[channel_id] = now
             card = server.get_game_card(intent["appid"])
             if card.get("status") != "ok":
                 return f"未在库中找到 AppID `{intent['appid']}`，可以用 `搜 游戏名` 先查一下。"
-            quotes = card.get("positive_quotes") or []
-            q_line = f"\n> {quotes[0]['quote_text']}" if quotes else ""
             if card["is_free"]:
-                price_str = "免费"
+                price_str = "`免费`"
             elif card.get("price_cny"):
-                price_str = f"¥{float(card['price_cny']):g}"
+                price_str = f"`¥{float(card['price_cny']):g}`"
+                if card.get("has_demo"):
+                    price_str += " `含Demo`"
             elif card.get("has_demo"):
-                price_str = "免费试玩 Demo"
+                price_str = "`免费试玩Demo`"
             else:
-                price_str = "待定"
-            return (
-                f"**🎮 《{card['name']}》**（AppID: `{card['appid']}`）\n"
-                f"- **评价**：{card['stars']} {card['review_tier']}（全语言 {card['positive_pct']}%｜简中 {card.get('schinese_pct') or '—'}%）\n"
-                f"- **价格**：{price_str}｜**支持人数**：{card.get('max_players') or '?'}人\n"
-                f"- **鉴赏家背书**：{card.get('curator_count', 0)} 位（{'、'.join(card.get('curators') or []) or '无'}）"
-                f"{q_line}"
-            )
+                price_str = "`待定`"
+
+            meta = [price_str]
+            if card.get("max_players"):
+                meta.append(f"`最多{card['max_players']}人`")
+            pos_str = f"{float(card.get('positive_pct') or 0):.1f}%"
+            review_line = f"{card['stars']} {card['review_tier']}（好评 {pos_str}"
+            if card.get("schinese_pct") is not None:
+                review_line += f"｜简中 {float(card['schinese_pct']):.1f}%"
+            review_line += "）"
+
+            lines = [
+                f"**🎮 {server._fmt_title(card['name'])}**  {' · '.join(meta)}  `AppID: {card['appid']}`",
+                f"📊 {review_line}",
+            ]
+            if card.get("current_players") or card.get("followers"):
+                early = []
+                if card.get("current_players"):
+                    early.append(f"在线 **{card['current_players']}** 人")
+                if card.get("followers"):
+                    early.append(f"关注 **{card['followers']}** 人")
+                lines.append(f"📈 {' · '.join(early)}")
+            human_curators = [c for c in (card.get("curators") or []) if not str(c).startswith("Steam")]
+            if human_curators:
+                lines.append(f"🏅 鉴赏家推荐：{'、'.join(human_curators[:4])}")
+            quotes = card.get("positive_quotes") or []
+            if quotes:
+                lines.append(f"> {server._truncate(quotes[0].get('quote_text'), 110)}")
+            lines.append(f"🔗 [Steam 商店页](https://store.steampowered.com/app/{card['appid']}/)")
+            return "\n".join(lines)
 
         if intent["action"] == "search":
             self.last_reply_at[channel_id] = now
@@ -320,10 +340,12 @@ class KookBotSession:
             items = res.get("items") or []
             if not items:
                 return f"没有搜到与「{intent['query']}」相关的联机游戏。"
-            lines = [f"🔎 **「{intent['query']}」搜索结果**："]
+            lines = [f"🔎 **「{intent['query']}」搜索结果**"]
             for it in items[:5]:
-                lines.append(f"- **《{it.get('name')}》**（AppID: `{it.get('appid')}`）— {it.get('review_tier_zh', 'Steam 商店')}")
-            lines.append("\n发送 `@我 详情 <AppID>` 可查看完整评测卡，发送 `@我 玩过 <AppID>` 可排除该游戏。")
+                aid = it.get("appid")
+                tier_label = it.get("review_tier_zh") or "Steam 商店"
+                lines.append(f"• **{server._fmt_title(it.get('name', ''))}**  `{aid}` · {tier_label}  [商店页](https://store.steampowered.com/app/{aid}/)")
+            lines.append("\n💡 发送 `@我 详情 <AppID>` 看评测卡，`@我 玩过 <AppID>` 排除该游戏。")
             return "\n".join(lines)
 
         if intent["action"] == "log":
@@ -350,17 +372,26 @@ class KookBotSession:
             return res["markdown_preview"]
 
         if intent["action"] == "ask":
-            llm_guess = call_llm_for_params(stripped)
-            if isinstance(llm_guess, dict) and any(llm_guess.get(k) for k in ("horror", "budget", "tag", "players")):
-                p = intent["params"]
-                for k in ("horror", "budget", "players", "mode", "tag"):
-                    if llm_guess.get(k) not in (None, "null", ""):
-                        p[k] = llm_guess[k]
-                p.setdefault("players", 4)
-                p.setdefault("horror", "any")
-                p.setdefault("budget", "any")
-                p.setdefault("mode", "online")
-                intent = {"action": "recommend", "params": p, "confirmed": True}
+            cleaned_for_llm = _strip_mentions(stripped, bot_name=self.bot_name)
+            if len(cleaned_for_llm) > 6 and cleaned_for_llm.lower() not in _BARE_GREETINGS:
+                llm_guess = call_llm_for_params(cleaned_for_llm)
+                if isinstance(llm_guess, dict) and any(llm_guess.get(k) for k in ("horror", "budget", "tag", "players")):
+                    p = intent["params"]
+                    if llm_guess.get("horror") in _VALID_HORROR:
+                        p["horror"] = llm_guess["horror"]
+                    if llm_guess.get("budget") in _VALID_BUDGET:
+                        p["budget"] = llm_guess["budget"]
+                    if llm_guess.get("mode") in _VALID_MODE:
+                        p["mode"] = llm_guess["mode"]
+                    if llm_guess.get("players") not in (None, "null", ""):
+                        p["players"] = _coerce_players(llm_guess["players"], 4)
+                    if llm_guess.get("tag") not in (None, "null", ""):
+                        p["tag"] = str(llm_guess["tag"]).strip()
+                    p.setdefault("players", 4)
+                    p.setdefault("horror", "any")
+                    p.setdefault("budget", "any")
+                    p.setdefault("mode", "online")
+                    intent = {"action": "recommend", "params": p, "confirmed": True}
 
         if intent["action"] == "recommend":
             self.pending_channels.pop(channel_id, None)
@@ -479,7 +510,7 @@ async def run_kook_ws(token: str, max_runtime_seconds: float = 19800) -> None:
         bot_name = me_data["data"].get("username", "Bot")
         print(f"KOOK bot authenticated: {bot_name} (id={bot_id})", flush=True)
 
-        session = KookBotSession()
+        session = KookBotSession(bot_name=bot_name)
         seen_msg_ids: set[str] = set()
         max_message_age_seconds = int(os.getenv("KOOK_MAX_MESSAGE_AGE_SECONDS", "900"))
         ws_connected = False
@@ -522,6 +553,8 @@ async def run_kook_ws(token: str, max_runtime_seconds: float = 19800) -> None:
         ):
             if not msg_id or msg_id in seen_msg_ids:
                 return
+            if len(seen_msg_ids) > 5000:
+                seen_msg_ids.clear()
             seen_msg_ids.add(msg_id)
             if is_bot or str(author_id) == bot_id:
                 return
@@ -618,7 +651,25 @@ async def run_kook_ws(token: str, max_runtime_seconds: float = 19800) -> None:
                     except Exception:
                         pass
 
+        async def refresh_snapshot_loop():
+            while time.time() < deadline:
+                remaining_ref = deadline - time.time()
+                if remaining_ref <= 0:
+                    break
+                await asyncio.sleep(min(1800.0, remaining_ref))
+                if time.time() >= deadline:
+                    break
+                try:
+                    updated = await asyncio.to_thread(server.refresh_cloud_snapshot)
+                    if updated:
+                        print("Hot-reloaded newer cloud snapshot data/games.sqlite", flush=True)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    print(f"Snapshot refresh warning: {exc}", flush=True)
+
         poll_task = asyncio.create_task(poll_channels())
+        refresh_task = asyncio.create_task(refresh_snapshot_loop())
         reconnect_attempt = 0
         try:
             while time.time() < deadline:
@@ -691,10 +742,12 @@ async def run_kook_ws(token: str, max_runtime_seconds: float = 19800) -> None:
                                         continue
                                     extra_author = d.get("extra", {}).get("author", {}) or {}
                                     content = str(d.get("content") or "")
-                                    channel_id = str(d.get("target_id") or "")
+                                    author_id = str(d.get("author_id") or "")
+                                    is_dm = d.get("channel_type") == "PERSON"
+                                    # In KOOK PERSON (DM) events, target_id is the bot's own ID; reply must go to author_id.
+                                    channel_id = author_id if is_dm else str(d.get("target_id") or "")
                                     mentions = [str(x) for x in (d.get("extra", {}).get("mention") or [])]
                                     mention_roles = [str(x) for x in (d.get("extra", {}).get("mention_roles") or [])]
-                                    is_dm = d.get("channel_type") == "PERSON"
                                     is_mentioned = (
                                         is_dm
                                         or bot_id in mentions
@@ -705,7 +758,7 @@ async def run_kook_ws(token: str, max_runtime_seconds: float = 19800) -> None:
                                     await process_incoming(
                                         channel_id=channel_id,
                                         msg_id=str(d.get("msg_id") or ""),
-                                        author_id=str(d.get("author_id") or ""),
+                                        author_id=author_id,
                                         is_bot=bool(extra_author.get("bot")),
                                         content=content,
                                         is_mentioned=is_mentioned,
@@ -737,7 +790,8 @@ async def run_kook_ws(token: str, max_runtime_seconds: float = 19800) -> None:
                     await asyncio.sleep(delay)
         finally:
             poll_task.cancel()
-            await asyncio.gather(poll_task, return_exceptions=True)
+            refresh_task.cancel()
+            await asyncio.gather(poll_task, refresh_task, return_exceptions=True)
 
 
 def main() -> None:

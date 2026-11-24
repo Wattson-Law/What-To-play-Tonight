@@ -4,6 +4,8 @@ from __future__ import annotations
 import json
 import os
 import tempfile
+import time
+import urllib.error
 import urllib.request
 from pathlib import Path
 from typing import Literal, Optional
@@ -29,6 +31,8 @@ CLOUD_DB_URL = os.getenv(
     "https://raw.githubusercontent.com/Wattson-Law/What-To-play-Tonight/main/data/games.sqlite",
 )
 CLOUD_CACHE_PATH = Path(tempfile.gettempdir()) / "coop-night-picker-cloud-games.sqlite"
+_CLOUD_ETAG: str | None = None
+_LAST_CLOUD_CHECK_AT: float = 0.0
 
 if FastMCP is not None:
     mcp = FastMCP("今晚玩什么 (coop-night-picker)")
@@ -76,25 +80,68 @@ def _save_log(log: dict, path: Path | None = None) -> None:
             os.unlink(name)
 
 
-def _download_cloud_snapshot(target_path: Path | None = None) -> bool:
+def _download_cloud_snapshot(target_path: Path | None = None, *, use_etag: bool = False) -> bool:
+    global _CLOUD_ETAG
     if not CLOUD_DB_URL or os.getenv("COOP_NIGHT_PICKER_DISABLE_CLOUD") == "1":
         return False
     dest = Path(target_path) if target_path is not None else CLOUD_CACHE_PATH
+    headers = {"User-Agent": "Mozilla/5.0"}
+    if use_etag and _CLOUD_ETAG and dest.exists():
+        headers["If-None-Match"] = _CLOUD_ETAG
     try:
-        req = urllib.request.Request(CLOUD_DB_URL, headers={"User-Agent": "Mozilla/5.0"})
+        req = urllib.request.Request(CLOUD_DB_URL, headers=headers)
         with urllib.request.urlopen(req, timeout=8) as resp:
             data = resp.read()
             if resp.status == 200 and data.startswith(b"SQLite format 3"):
                 dest.parent.mkdir(parents=True, exist_ok=True)
-                dest.write_bytes(data)
+                fd, tmp_name = tempfile.mkstemp(prefix=".cloud-games.", suffix=".tmp", dir=dest.parent)
+                try:
+                    with os.fdopen(fd, "wb") as fh:
+                        fh.write(data)
+                        fh.flush()
+                        os.fsync(fh.fileno())
+                    os.replace(tmp_name, dest)
+                finally:
+                    if os.path.exists(tmp_name):
+                        os.unlink(tmp_name)
+                etag = resp.headers.get("ETag") if hasattr(resp, "headers") and resp.headers else None
+                if etag:
+                    _CLOUD_ETAG = etag
                 return True
+    except urllib.error.HTTPError as exc:
+        if exc.code == 304:
+            return False
+        return False
     except Exception:
         return False
     return False
 
 
+def refresh_cloud_snapshot(*, min_interval_sec: float = 1800.0, force: bool = False) -> bool:
+    """Check GitHub raw snapshot via ETag and hot-swap CLOUD_CACHE_PATH when a newer build lands."""
+    global _LAST_CLOUD_CHECK_AT
+    if DB_PATH != DEFAULT_DB_PATH or os.getenv("COOP_NIGHT_PICKER_DISABLE_CLOUD") == "1":
+        return False
+    now = time.time()
+    if not force and now - _LAST_CLOUD_CHECK_AT < min_interval_sec:
+        return False
+    _LAST_CLOUD_CHECK_AT = now
+    return _download_cloud_snapshot(CLOUD_CACHE_PATH, use_etag=True)
+
+
 def _open_snapshot():
     if DB_PATH.exists():
+        # Prefer a fresher hot-reloaded cloud cache when running against the default checkout DB
+        if (
+            DB_PATH == DEFAULT_DB_PATH
+            and os.getenv("COOP_NIGHT_PICKER_DISABLE_CLOUD") != "1"
+            and CLOUD_CACHE_PATH.exists()
+            and CLOUD_CACHE_PATH.stat().st_mtime > DB_PATH.stat().st_mtime
+        ):
+            try:
+                return db.init_db(CLOUD_CACHE_PATH)
+            except Exception:
+                pass
         try:
             return db.init_db(DB_PATH)
         except Exception:
@@ -525,12 +572,21 @@ def recommend_coop_games(
             groups.setdefault(score, []).append(_format_game(game, conn))
         groups = {str(k): v[: max(1, int(limit_per_tier))] for k, v in sorted(groups.items(), reverse=True)}
         ids = {g["appid"] for values in groups.values() for g in values}
+        def _avoid_matches_horror(g: dict) -> bool:
+            if horror == "any":
+                return True
+            hl = g.get("horror_level", "none")
+            if horror == "mild":
+                tags = " ".join(map(str, g.get("tags_json") or []))
+                return hl == "mild" or (hl == "scary" and ("欢乐" in tags or "喜剧" in tags))
+            return hl == horror
+
         avoid = [
             _format_game(g, conn)
             for g in db.get_avoid_list(conn, 20)
             if int(g["appid"]) not in excluded
             and int(g["appid"]) not in ids
-            and (horror in {"any", g.get("horror_level", "none")})
+            and _avoid_matches_horror(g)
             and (not players or g.get("max_players") is None or int(g.get("max_players")) >= players)
             and (mode == "any" or (mode == "online" and g.get("online_coop")) or (mode == "local" and g.get("local_coop")))
             and (not tag or db._matches_tag(g, tag))

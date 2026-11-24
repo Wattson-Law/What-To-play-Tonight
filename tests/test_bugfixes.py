@@ -243,7 +243,7 @@ class PlayabilityAndSnapshotTests(unittest.TestCase):
                 any("简中" in str(r) for r in g1["avoid_reasons_json"]),
                 f"Expected schinese-gap avoid reason, got {g1['avoid_reasons_json']}",
             )
-            self.assertEqual(g2["online_coop"], 0, "Explicitly single-player game must not be forced online_coop=1")
+            self.assertIsNone(g2, "Explicitly single-player game must be excluded from co-op snapshot")
 
     def test_build_snapshot_skips_unplayable_coming_soon_and_keeps_demo_and_majority_positive_game(self):
         with tempfile.TemporaryDirectory() as tmp:

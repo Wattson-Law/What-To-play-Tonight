@@ -245,9 +245,10 @@ def recommend_games(conn, *, horror="any", budget="any", players=None, mode="onl
     elif mode == "local":
         sql += " AND local_coop=1"
     sql += (
-        " ORDER BY CASE WHEN curators_json LIKE '%Steam%' THEN 2"
+        " ORDER BY CASE WHEN curators_json LIKE '%Steam%' OR COALESCE(curator_count, 0) > 0 THEN 2"
         " WHEN tags_json LIKE '%欢乐%' OR tags_json LIKE '%喜剧%' OR tags_json LIKE '%物理%' OR tags_json LIKE '%派对%' THEN 1 ELSE 0 END DESC,"
-        " COALESCE(curator_count, 0) DESC, review_score DESC, COALESCE(potential_score, 0) DESC, positive_pct DESC LIMIT ?"
+        " review_score DESC, CAST(COALESCE(positive_pct, 0) / 5.0 AS INTEGER) DESC,"
+        " COALESCE(curator_count, 0) DESC, COALESCE(positive_pct, 0) DESC, COALESCE(potential_score, 0) DESC LIMIT ?"
     )
     args.append(max(limit * 4, 200) if tag else limit)
     rows = [_decode(r) for r in conn.execute(sql, args)]

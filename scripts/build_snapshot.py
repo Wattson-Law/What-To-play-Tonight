@@ -208,7 +208,10 @@ def main(argv=None):
         else []
     )
     kept_ids: list[int] = []
+    kept_linked_ids: set[int] = set()
     processed_ids: set[int] = set()
+    consecutive_review_failures = 0
+    appreviews_disabled = False
 
     def fixture(appid, kind):
         if not root:
@@ -225,7 +228,8 @@ def main(argv=None):
         return None
 
     def _enrich_and_persist(appid: int, seed: dict, *, is_radar_slice: bool = False) -> bool:
-        if appid in processed_ids:
+        nonlocal consecutive_review_failures, appreviews_disabled
+        if appid in processed_ids or appid in kept_linked_ids:
             return False
         processed_ids.add(appid)
         game = dict(seed.get("game", seed))
@@ -252,6 +256,15 @@ def main(argv=None):
             elif k not in game:
                 game[k] = v
 
+        # Skip if linked fullgame/demo pair was already kept (avoid duplicate slots for same title)
+        linked_ids = {appid}
+        if game.get("demo_appid"):
+            linked_ids.add(int(game["demo_appid"]))
+        if game.get("fullgame_appid"):
+            linked_ids.add(int(game["fullgame_appid"]))
+        if linked_ids & kept_linked_ids:
+            return False
+
         game["has_demo"] = int(
             bool(game.get("has_demo"))
             or game.get("type") == "demo"
@@ -263,12 +276,22 @@ def main(argv=None):
         if game.get("coming_soon") and not game.get("is_free") and not game["has_demo"]:
             return False
 
+        # Developer-declared Steam categories are ground truth for multiplayer support:
+        # exclude pure single-player games even if crowdsourced tags were trolled.
+        category_ids = set(game.get("category_ids") or [])
+        multiplayer_cat_ids = {1, 9, 20, 24, 27, 36, 37, 38, 39, 44, 47, 48, 49}
+        explicit_single_only = bool(category_ids) and (2 in category_ids) and not (multiplayer_cat_ids & category_ids)
+        if explicit_single_only:
+            return False
+
         store_raw = fixture(appid, "store") or fixture(appid, "store_page")
         page = parse_store_page(store_raw or (client.store_page(appid) if not root else ""))
         game["has_ai_disclosure"] = int(page.get("has_ai_disclosure", 0))
         tags = page["tags"]
         tag_ids = {tag["id"] for tag in tags}
         all_tag_ids = tag_ids | seed_tag_ids
+        # Use only Steam's top-8 highest-voted tags for horror classification to ignore low-vote troll tags (e.g. #17 心理恐怖)
+        horror_tag_pool = ({tag["id"] for tag in tags[:8]} | seed_tag_ids) if tags else seed_tag_ids
 
         tag_names = []
         seen_t = set()
@@ -282,26 +305,18 @@ def main(argv=None):
                 tag_names.append(t_name)
         game["tags_json"] = tag_names
 
-        if {1667, 3978} & all_tag_ids:
+        if {1667, 3978} & horror_tag_pool:
             game["horror_level"] = "scary"
-        elif 1721 in all_tag_ids:
+        elif 1721 in horror_tag_pool:
             game["horror_level"] = "mild"
         else:
             game["horror_level"] = "none"
 
-        category_ids = set(game.get("category_ids") or [])
         category_names = set(game.get("categories_json") or [])
         category_names.update(CATEGORY_ZH[category_id] for category_id in category_ids if category_id in CATEGORY_ZH)
         game["categories_json"] = sorted(category_names)
-        explicit_single_only = (
-            bool(category_ids)
-            and (2 in category_ids)
-            and not ({1, 9, 20, 27, 36, 38, 44, 47, 48, 49} & category_ids)
-            and not ({1685, 3843, 4508} & all_tag_ids)
-        )
         game["online_coop"] = int(
-            not explicit_single_only
-            and bool({9, 38} & category_ids or {1685, 3843, 4508} & all_tag_ids or "在线合作" in category_names or c_entries or is_radar_slice)
+            bool({9, 38} & category_ids or {1685, 3843, 4508} & all_tag_ids or "在线合作" in category_names or c_entries or is_radar_slice)
         )
         game["local_coop"] = int(
             bool(
@@ -407,12 +422,28 @@ def main(argv=None):
             negative_raw = fixture(appid, "reviews_negative")
             if positive_raw:
                 positive_reviews = _review_payload(positive_raw)["reviews"]
-            elif not root:
-                positive_reviews = _review_payload(json.dumps(client.appreviews(appid, review_type="positive")))["reviews"]
+            elif not root and not appreviews_disabled:
+                raw_pos = client.appreviews(appid, review_type="positive")
+                if isinstance(raw_pos, dict) and raw_pos.get("unavailable"):
+                    consecutive_review_failures += 1
+                    if consecutive_review_failures >= 3:
+                        appreviews_disabled = True
+                        print("appreviews endpoint unavailable (3 consecutive failures); skipping remaining review fetches", flush=True)
+                else:
+                    consecutive_review_failures = 0
+                    positive_reviews = parse_appreviews(raw_pos)["reviews"]
             if negative_raw:
                 negative_reviews = _review_payload(negative_raw)["reviews"]
-            elif not root:
-                negative_reviews = _review_payload(json.dumps(client.appreviews(appid, review_type="negative")))["reviews"]
+            elif not root and not appreviews_disabled:
+                raw_neg = client.appreviews(appid, review_type="negative")
+                if isinstance(raw_neg, dict) and raw_neg.get("unavailable"):
+                    consecutive_review_failures += 1
+                    if consecutive_review_failures >= 3:
+                        appreviews_disabled = True
+                        print("appreviews endpoint unavailable (3 consecutive failures); skipping remaining review fetches", flush=True)
+                else:
+                    consecutive_review_failures = 0
+                    negative_reviews = parse_appreviews(raw_neg)["reviews"]
             if not positive_raw and not negative_raw and root:
                 all_raw = fixture(appid, "reviews")
                 all_reviews = _review_payload(all_raw)["reviews"] if all_raw else []
@@ -426,12 +457,17 @@ def main(argv=None):
             game.get("schinese_pct") is not None
             and game.get("positive_pct") is not None
             and (game.get("schinese_total") is None or int(game["schinese_total"]) >= 10)
+            and float(game["schinese_pct"]) < 70.0
             and (float(game["positive_pct"]) - float(game["schinese_pct"]) >= 15.0)
         )
         if schinese_gap:
             avoid_reasons.append(
                 f"简中好评率偏低({float(game['schinese_pct']):.0f}% vs 全语言{float(game['positive_pct']):.0f}%)"
             )
+        score = game["review_score"]
+        if 1 <= score <= 5 and not avoid_reasons:
+            pct = float(game.get("positive_pct") or 0)
+            avoid_reasons.append(f"{game['review_tier_zh']}({pct:.0f}%)" if pct > 0 else game["review_tier_zh"])
         game["avoid_reasons_json"] = avoid_reasons
         game["negative_match_reviews"] = sum(
             1
@@ -442,7 +478,6 @@ def main(argv=None):
                 for dimension in quote["dimensions_json"]
             )
         )
-        score = game["review_score"]
         human_pos_curators = [c for c in pos_curators if not str(c).startswith("Steam")]
         game["is_avoid"] = int(
             (1 <= score <= 5)
@@ -453,6 +488,7 @@ def main(argv=None):
         )
 
         kept_ids.append(appid)
+        kept_linked_ids.update(linked_ids)
         if not args.dry_run:
             upsert_game(conn, game)
             conn.execute("DELETE FROM game_quotes WHERE appid=?", (appid,))
