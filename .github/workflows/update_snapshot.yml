@@ -17,9 +17,14 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: update-snapshot-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   update:
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
