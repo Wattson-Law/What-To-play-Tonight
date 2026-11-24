@@ -24,9 +24,10 @@ permissions:
   models: read
 
 concurrency:
-  # Queue instead of cancel: killing the in-flight run would take the bot offline.
+  # Queue hourly schedule runs so the bot stays online 24/7,
+  # but let code pushes / manual dispatches take over immediately.
   group: kook-bot-runner
-  cancel-in-progress: false
+  cancel-in-progress: ${{ github.event_name != 'schedule' }}
 
 jobs:
   kook-bot:

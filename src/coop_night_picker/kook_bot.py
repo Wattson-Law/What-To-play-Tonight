@@ -183,10 +183,12 @@ def parse_intent_from_text(text: str, defaults: dict[str, Any] | None = None) ->
             params.pop("tag", None)
         return {"action": "potential_demos", "params": params}
 
-    core_filled = sum(1 for key in ("players", "horror", "budget") if params.get(key) not in (None, ""))
-    has_trigger = any(w in cleaned for w in ("推荐", "玩什么", "玩啥", "来个", "有什么"))
-    enough = core_filled >= 2 and (has_trigger or m_players or defaults is not None or core_filled >= 3)
-    if enough or (has_trigger and params.get("tag")):
+    # Recommend immediately whenever the user gives ANY concrete condition; only ask when 0 conditions were supplied.
+    has_any_condition = (
+        any(params.get(key) not in (None, "") for key in ("players", "horror", "budget", "tag", "session_duration"))
+        or params.get("mode") == "local"
+    )
+    if has_any_condition:
         params.setdefault("players", 4)
         params.setdefault("horror", "any")
         params.setdefault("budget", "any")
@@ -285,7 +287,8 @@ class KookBotSession:
         if not in_pending and now - self.last_reply_at.get(channel_id, 0.0) < self.cooldown_sec:
             return None
 
-        prior = self.pending_channels.get(channel_id)
+        # Fresh @mention starts a clean query instead of leaking stale filters from an earlier dialog.
+        prior = None if is_mentioned else self.pending_channels.get(channel_id)
         intent = parse_intent_from_text(stripped, defaults=prior)
 
         if intent["action"] == "card":

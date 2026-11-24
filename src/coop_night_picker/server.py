@@ -207,71 +207,164 @@ def _format_game(game, conn=None):
     return formatted
 
 
+_HORROR_ZH = {"none": "不恐怖", "mild": "微恐", "scary": "恐怖", "any": "不限恐怖"}
+_BUDGET_ZH = {"free_or_demo": "免费/Demo", "under_50": "50元以内", "any_paid": "付费买断", "any": "不限预算"}
+_MODE_ZH = {"online": "在线合作", "local": "本地同屏", "any": "在线/本地"}
+
+
+def _fmt_title(name: str) -> str:
+    n = str(name or "").strip()
+    return n if (n.startswith("《") and "》" in n) else f"《{n}》"
+
+
+def _compact_url(url: str) -> str:
+    # Strip verbose Steam snr tracking tokens so KMarkdown replies stay compact (fit in 1 KOOK message)
+    u = str(url or "").strip()
+    if "snr=" in u and "store.steampowered.com/app/" in u:
+        import re as _re
+        u = _re.sub(r"([?&])snr=[^&]+&?", r"\1", u).rstrip("?&")
+    return u
+
+
+def _truncate(text: str | None, limit: int) -> str:
+    clean = " ".join(str(text or "").split())
+    if len(clean) <= limit:
+        return clean
+    cut = clean[:limit].rstrip(" ，,。.;；:：-")
+    # Avoid chopping the middle of an ASCII word
+    if cut and cut[-1].isascii() and cut[-1].isalnum() and len(clean) > len(cut) and clean[len(cut)].isascii() and clean[len(cut)].isalnum():
+        space = cut.rfind(" ")
+        if space >= limit // 2:
+            cut = cut[:space]
+    return cut.rstrip(" ，,。.;；:：-") + "…"
+
+
+def _dedupe_demo_pairs(rows: list[dict]) -> list[dict]:
+    """Collapse Demo + Fullgame duplicates referring to the same title."""
+    seen: set[int] = set()
+    out: list[dict] = []
+    for row in rows:
+        aid = int(row.get("appid") or 0)
+        linked = {aid}
+        if row.get("demo_appid"):
+            linked.add(int(row["demo_appid"]))
+        if row.get("fullgame_appid"):
+            linked.add(int(row["fullgame_appid"]))
+        if linked & seen:
+            continue
+        seen.update(linked)
+        out.append(row)
+    return out
+
+
 def _markdown(groups, avoid, players, horror, budget, mode="online", tag=None):
-    mode_label = {"online": "online", "local": "local/co-op", "any": "online/local"}.get(mode, mode)
-    tag_suffix = f"｜{tag}" if tag else ""
-    title = f"**🎮 今晚玩什么 · 筛选结果**（{players}人｜{horror}｜{budget}｜{mode_label}{tag_suffix}）"
-    lines = [title, ""]
-    for score, games in groups.items():
+    badges = [
+        f"`{players}人`",
+        f"`{_HORROR_ZH.get(horror, horror)}`",
+        f"`{_BUDGET_ZH.get(budget, budget)}`",
+        f"`{_MODE_ZH.get(mode, mode)}`",
+    ]
+    if tag:
+        badges.append(f"`{tag}`")
+    lines = [f"**🎮 今晚玩什么 · 筛选结果**  {' '.join(badges)}"]
+
+    shown_total = 0
+    max_total = 6
+    tier_items = list(groups.items())
+    for tier_idx, (score, games) in enumerate(tier_items):
+        if shown_total >= max_total:
+            break
         tier = REVIEW_TIERS[int(score)]
+        cap = min(2 if len(tier_items) >= 3 else 3, max_total - shown_total)
+        batch = games[:cap]
+        if not batch:
+            continue
+        lines.append("")
+        if tier_idx > 0:
+            lines.append("---")
         if int(score) == 0:
-            lines += ["**【🧪 整活新品 & 免费试玩专区（刚出新游 / 可下 Demo）】**"]
+            lines.append("**🧪 整活新品 & 免费试玩专区**")
         else:
-            lines += [f"**【{tier['stars']} {tier['zh']}（Score {score}）】**"]
-        display_cap = 2 if len(groups) >= 3 else 3
-        for i, g in enumerate(games[:display_cap], 1):
-            price = "免费" if g["is_free"] else (f"¥{float(g['price_cny']):g}" if g.get("price_cny") else ("免费试玩 Demo" if g.get("has_demo") else "待定"))
-            if g.get("has_demo") and not g["is_free"] and g.get("price_cny"):
-                price += "（含免费Demo）"
-            coop_label = "在线合作" if mode == "online" else ("本地合作" if mode == "local" else "在线/本地合作")
-            lines.append(f"{i}. **《{g['name']}》** — {price} | 支持 {g.get('max_players') or '?'} 人{coop_label}")
-            if g.get("short_desc"):
-                lines.append(f"   - 🎯 **玩法设定**：{g['short_desc']}")
-            if g.get("curator_count"):
-                curator_names = "、".join(g.get("curators") or [])
-                lines.append(f"   - 🏅 **鉴赏家/趋势精选**：入选 {g['curator_count']} 个精选榜单（{curator_names}）")
-            pos_pct = f"{float(g.get('positive_pct') or 0):.1f}%"
-            sc_pct = f"{float(g['schinese_pct']):.1f}%" if g.get("schinese_pct") is not None else "—"
-            lines.append(
-                f"   - 📊 **口碑**：全语言 {pos_pct}（{tier['zh']}，{g.get('total_reviews', 0)}篇）"
-                f"｜简中 {sc_pct}"
-            )
-            if int(score) == 0 and (g.get("current_players") or g.get("followers")):
-                early_parts = []
+            lines.append(f"**{tier['stars']} {tier['zh']}**")
+
+        for i, g in enumerate(batch, 1):
+            shown_total += 1
+            if g["is_free"]:
+                price = "`免费`"
+            elif g.get("price_cny"):
+                price = f"`¥{float(g['price_cny']):g}`"
+                if g.get("has_demo"):
+                    price += " `含Demo`"
+            elif g.get("has_demo"):
+                price = "`免费Demo`"
+            else:
+                price = "`待定`"
+
+            meta_parts = [price]
+            if g.get("max_players"):
+                meta_parts.append(f"`最多{g['max_players']}人`")
+            if int(score) > 0:
+                pos_pct = f"{float(g.get('positive_pct') or 0):.1f}%"
+                if g.get("schinese_pct") is not None:
+                    meta_parts.append(f"好评 {pos_pct}（简中 {float(g['schinese_pct']):.1f}%）")
+                elif g.get("total_reviews"):
+                    meta_parts.append(f"好评 {pos_pct}（{g['total_reviews']}篇）")
+                else:
+                    meta_parts.append(f"好评 {pos_pct}")
+            else:
                 if g.get("current_players"):
-                    early_parts.append(f"当前在线 {g['current_players']} 人")
+                    meta_parts.append(f"当前在线 {g['current_players']} 人")
                 if g.get("followers"):
-                    early_parts.append(f"本体关注 {g['followers']} 人")
+                    meta_parts.append(f"关注 {g['followers']} 人")
                 if g.get("release_age_days") is not None:
-                    early_parts.append(f"上线 {g['release_age_days']} 天")
-                lines.append(f"   - 📈 **早期热度**：{'｜'.join(early_parts)}")
-            quotes = g.get("quotes", [])
+                    meta_parts.append(f"上线{g['release_age_days']}天")
+
+            lines.append("")
+            lines.append(f"**{i}. {_fmt_title(g['name'])}**  {' · '.join(meta_parts)}")
+
+            desc = _truncate(g.get("short_desc"), 64)
+            steam_url = f"https://store.steampowered.com/app/{g.get('demo_appid') or g['appid']}/"
+            if desc:
+                lines.append(f"{desc}  [商店页]({steam_url})")
+            else:
+                lines.append(f"🔗 [前往 Steam]({steam_url})")
+
+            human_curators = [c for c in (g.get("curators") or []) if not str(c).startswith("Steam")]
+            quotes = g.get("quotes") or []
+            rendered_quote = False
             for q in quotes[:1]:
-                q_text = q.get("quote_text", "")
+                q_text = str(q.get("quote_text") or "").strip()
                 if not q_text:
                     continue
-                if str(q_text).startswith("[鉴赏家·"):
-                    lines.append(f"   - 💡 **推荐理由（来自Steam鉴赏家评测）**：> {q_text}（[查看评测]({q.get('review_url', '')})）")
+                rendered_quote = True
+                if q_text.startswith("[鉴赏家·"):
+                    end_bracket = q_text.find("]")
+                    curator_label = q_text[5:end_bracket] if end_bracket > 5 else "鉴赏家"
+                    body = _truncate(q_text[end_bracket + 1 :].strip(), 72) if end_bracket > 0 else _truncate(q_text, 72)
+                    url = _compact_url(q.get("review_url") or steam_url)
+                    lines.append(f"> 🏅 鉴赏家 **{curator_label}**：{body}（[查看评测]({url})）")
                 else:
-                    lines.append(
-                        f"   - 💡 **推荐理由（来自玩家评测）**：> {q_text}"
-                        f"（👍 {q.get('votes_helpful', 0)} 人觉得有用 · [查看原评]({q.get('review_url', '')})）"
-                    )
-        lines.append("")
-    lines += ["---", "**【⚠️ 避雷榜（同筛选条件下容易踩坑的游戏）】**"]
-    avoid_lines = []
-    for g in avoid:
-        reasons = g.get("avoid_reasons") or []
-        reason_text = "、".join(map(str, reasons)) if isinstance(reasons, list) else str(reasons)
-        avoid_lines.append(
-            f"- ❌ **《{g['name']}》** — {reason_text or REVIEW_TIERS.get(int(g.get('review_score') or 0), REVIEW_TIERS[0])['zh']}"
-        )
-        for q in (g.get("negative_quotes") or [])[:1]:
-            avoid_lines.append(
-                f"  - 💡 **避雷证据（来自玩家评测）**：> {q.get('quote_text', '')}"
-                f"（👍 {q.get('votes_helpful', 0)} 人觉得有用 · [原评]({q.get('review_url', '')})）"
-            )
-    lines += avoid_lines or ["- 暂无"]
+                    body = _truncate(q_text, 72)
+                    url = _compact_url(q.get("review_url") or steam_url)
+                    lines.append(f"> 💬 玩家评：{body}（👍{q.get('votes_helpful', 0)} · [原评]({url})）")
+            if not rendered_quote and human_curators:
+                lines.append(f"🏅 鉴赏家推荐：{'、'.join(human_curators[:3])}")
+
+    lines.extend(["", "---", "**⚠️ 避雷榜**"])
+    if avoid:
+        for g in avoid[:3]:
+            reasons = g.get("avoid_reasons") or []
+            reason_text = "、".join(map(str, reasons)) if isinstance(reasons, list) else str(reasons)
+            fallback_tier = REVIEW_TIERS.get(int(g.get("review_score") or 0), REVIEW_TIERS[0])["zh"]
+            lines.append(f"• **{_fmt_title(g['name'])}** — {reason_text or fallback_tier}")
+            for q in (g.get("negative_quotes") or [])[:1]:
+                q_body = _truncate(q.get("quote_text"), 75)
+                if q_body:
+                    lines.append(f"> 避雷证据（来自玩家评测）：{q_body}（[原评]({q.get('review_url', '')})）")
+    else:
+        lines.append("• 暂无")
+
+    lines.extend(["", "💡 换条件直接说 `4人 不恐怖 50以内` · 挖新试玩发 `潜力demo`"])
     return "\n".join(lines)
 
 
@@ -425,7 +518,7 @@ def recommend_coop_games(
                 "avoid_list": [],
                 "markdown_preview": "",
             }
-        games = _filtered(conn, horror, budget, players, mode, excluded, tag=tag)
+        games = _dedupe_demo_pairs(_filtered(conn, horror, budget, players, mode, excluded, tag=tag))
         groups = {}
         for game in games:
             score = int(game.get("review_score") or 0)
@@ -566,56 +659,60 @@ def log_play(appid: int, status: Literal["played", "avoided", "wishlist"], note:
 
 
 def _demo_radar_markdown(items: list[dict], max_age_days: int | None, horror: str, players: int | None, mode: str, tag: str | None = None, widened: bool = False) -> str:
-    mode_label = {"online": "在线合作", "local": "本地合作", "any": "在线/本地"}.get(mode, mode)
-    conds = [f"近{max_age_days}天" if max_age_days and not widened else "全周期潜力试玩", mode_label]
+    badges = [
+        f"`近{max_age_days}天`" if max_age_days and not widened else "`全周期潜力试玩`",
+        f"`{_MODE_ZH.get(mode, mode)}`",
+    ]
     if players:
-        conds.append(f"{players}人")
+        badges.append(f"`{players}人`")
     if horror and horror != "any":
-        conds.append(horror)
+        badges.append(f"`{_HORROR_ZH.get(horror, horror)}`")
     if tag:
-        conds.append(tag)
-    lines = [f"**🧪 潜力新 Demo 雷达（小而美 / 刚出试玩）**（{'｜'.join(conds)}）", ""]
+        badges.append(f"`{tag}`")
+    lines = [f"**🧪 潜力新 Demo 雷达**  {' '.join(badges)}"]
     if not items:
-        lines.append("当前筛选条件下暂无新上架的高潜力 Demo，试试放宽人数或恐怖条件。")
+        lines.extend(["", "当前筛选条件下暂无新上架的高潜力 Demo，试试放宽人数或恐怖条件。"])
         return "\n".join(lines)
     for i, g in enumerate(items, 1):
         age = g.get("release_age_days")
-        age_str = f"上线 {age} 天" if age is not None else ("热门愿望单试玩" if g.get("has_demo") else "新试玩")
-        players_str = f"支持 {g['max_players']} 人" if g.get("max_players") else "联机合作"
-        score_str = f"潜力分 {float(g.get('potential_score') or 0):.1f}"
-        lines.append(f"{i}. **《{g['name']}》** — 免费试玩 | {age_str} | {players_str} | {score_str}")
+        meta_parts = [f"`上线{age}天`" if age is not None else "`热门试玩`"]
+        if g.get("max_players"):
+            meta_parts.append(f"`最多{g['max_players']}人`")
+        meta_parts.append(f"潜力分 **{float(g.get('potential_score') or 0):.1f}**")
+        lines.append("")
+        lines.append(f"**{i}. {_fmt_title(g['name'])}**  {' · '.join(meta_parts)}")
+
         signal_parts: list[str] = []
         ccu = int(g.get("current_players") or 0)
         fol = int(g.get("followers") or 0)
         news = int(g.get("recent_news_count") or 0)
         if ccu > 0:
-            signal_parts.append(f"当前在线 {ccu} 人")
+            signal_parts.append(f"在线 **{ccu}** 人")
         if fol > 0:
             est_low = fol * 7
             est_high = fol * 12
             if est_low >= 1000:
-                signal_parts.append(f"本体关注 {fol} 人（估约 {est_low / 1000:.1f}k–{est_high / 1000:.1f}k 愿望单）")
+                signal_parts.append(f"关注 **{fol}** 人（约 {est_low / 1000:.1f}k–{est_high / 1000:.1f}k 愿望单）")
             else:
-                signal_parts.append(f"本体关注 {fol} 人")
+                signal_parts.append(f"关注 **{fol}** 人")
         if news > 0:
-            signal_parts.append(f"近14天更新/公告 {news} 次")
-        if g.get("total_reviews"):
-            signal_parts.append(f"已有 {g['total_reviews']} 篇评测（{float(g.get('positive_pct') or 0):.0f}%好评）")
-        if signal_parts:
-            lines.append(f"   - 📈 **早期动能**：{'｜'.join(signal_parts)}")
-        polish_parts: list[str] = []
+            signal_parts.append(f"近14天更新 {news} 次")
         if g.get("has_schinese"):
-            polish_parts.append("支持简中")
+            signal_parts.append("简中")
         if g.get("has_trailer"):
-            polish_parts.append("含实机预告片")
+            signal_parts.append("含预告")
         if g.get("has_ai_disclosure"):
-            polish_parts.append("⚠️ 含 AI 内容披露")
-        if polish_parts:
-            lines.append(f"   - ✨ **质感**：{'｜'.join(polish_parts)}")
-        if g.get("short_desc"):
-            lines.append(f"   - 🎯 **玩法设定**：{g['short_desc']}")
+            signal_parts.append("⚠️AI披露")
+        if signal_parts:
+            lines.append(f"📈 {' · '.join(signal_parts)}")
+
         target_id = g.get("demo_appid") or g["appid"]
-        lines.append(f"   - 🔗 [前往 Steam 试玩](https://store.steampowered.com/app/{target_id}/)")
+        steam_url = f"https://store.steampowered.com/app/{target_id}/"
+        desc = _truncate(g.get("short_desc"), 72)
+        if desc:
+            lines.append(f"{desc}  [去试玩]({steam_url})")
+        else:
+            lines.append(f"🔗 [前往 Steam 试玩]({steam_url})")
     return "\n".join(lines)
 
 
@@ -626,7 +723,7 @@ def discover_potential_demos(
     mode: Literal["online", "local", "any"] = "online",
     tag: Optional[str] = None,
     min_score: float = 8.0,
-    limit: int = 8,
+    limit: int = 6,
 ) -> dict:
     """发现刚上线（1–14天）或处于试玩阶段的高潜力小而美 Demo，按实时在线/本体关注/活跃更新综合排序。"""
     log = _load_log()
@@ -648,10 +745,10 @@ def discover_potential_demos(
             mode=mode,
             tag=tag,
             min_score=min_score,
-            limit=max(limit * 2, 20),
+            limit=max(limit * 3, 24),
         )
         widened = False
-        rows = [r for r in rows if int(r.get("appid", 0)) not in excluded]
+        rows = _dedupe_demo_pairs([r for r in rows if int(r.get("appid", 0)) not in excluded])
         if not rows:
             widened = True
             rows = db.recommend_potential_demos(
@@ -662,9 +759,9 @@ def discover_potential_demos(
                 mode=mode,
                 tag=tag,
                 min_score=0.0,
-                limit=max(limit * 2, 20),
+                limit=max(limit * 3, 24),
             )
-            rows = [r for r in rows if int(r.get("appid", 0)) not in excluded]
+            rows = _dedupe_demo_pairs([r for r in rows if int(r.get("appid", 0)) not in excluded])
         items = [_format_game(r, conn) for r in rows[: max(1, int(limit))]]
         return {
             "status": "ok",

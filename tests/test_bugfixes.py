@@ -381,6 +381,154 @@ class KookBotBugfixTests(unittest.TestCase):
         self.assertEqual(i4["params"]["horror"], "scary")
         self.assertEqual(i4["params"]["budget"], "any")
 
+        # Real user messages from KOOK screenshots: supplying ANY condition must recommend immediately (no interrogation)
+        i5 = kook_bot.parse_intent_from_text("@What to play 两个人玩的微恐游戏")
+        self.assertEqual(i5["action"], "recommend")
+        self.assertEqual(i5["params"]["players"], 2)
+        self.assertEqual(i5["params"]["horror"], "mild")
+
+        i6 = kook_bot.parse_intent_from_text("@What to play 两个人的妖精小游戏")
+        self.assertEqual(i6["action"], "recommend")
+        self.assertEqual(i6["params"]["players"], 2)
+        self.assertEqual(i6["params"]["tag"], "欢乐")
+
+        # Pure greeting / no conditions still asks once
+        i_empty = kook_bot.parse_intent_from_text("@What to play 今晚玩啥")
+        self.assertEqual(i_empty["action"], "ask")
+
+    def test_new_mention_does_not_leak_stale_pending_filters(self):
+        session = kook_bot.KookBotSession(cooldown_sec=0.0)
+        # Simulate an abandoned pending dialog that stored budget=free_or_demo
+        session.pending_channels["ch-leak"] = {"budget": "free_or_demo"}
+        session.pending_since["ch-leak"] = 10**12
+        with mock.patch.object(
+            server,
+            "recommend_coop_games",
+            return_value={"status": "ok", "markdown_preview": "**ok**"},
+        ) as rec_mock:
+            reply = session.handle_message("ch-leak", "(met)999(met) 两个人的妖精小游戏", is_mentioned=True)
+            self.assertEqual(reply, "**ok**")
+            self.assertEqual(rec_mock.call_args.kwargs["budget"], "any")
+            self.assertEqual(rec_mock.call_args.kwargs["players"], 2)
+            self.assertEqual(rec_mock.call_args.kwargs["tag"], "欢乐")
+
+    def test_kook_markdown_layout_is_clean_chinese_and_compact(self):
+        long_desc = "这是一款超级长的游戏介绍文案，" * 12
+        long_quote = "[鉴赏家·UP鉴游组] " + "这是一段非常非常长的鉴赏家百字长评，用来测试排版截断是否干净利落不刷屏。" * 5
+        md = server._markdown(
+            {
+                "8": [
+                    {
+                        "appid": 4096830,
+                        "name": "潜艇菜鸟团",
+                        "is_free": False,
+                        "has_demo": True,
+                        "price_cny": 29.75,
+                        "max_players": None,
+                        "curator_count": 2,
+                        "curators": ["Steam物理互坑·欢乐联机热榜", "UP鉴游组"],
+                        "positive_pct": 84.4,
+                        "schinese_pct": None,
+                        "total_reviews": 120,
+                        "short_desc": long_desc,
+                        "quotes": [{"quote_text": long_quote, "review_url": "https://store.steampowered.com/app/4096830/"}],
+                    }
+                ]
+            },
+            [],
+            2,
+            "any",
+            "free_or_demo",
+            mode="online",
+            tag="欢乐",
+        )
+        # No raw English enums, no broken "? 人", no "简中 —", no inline ": > ", no nested "   - " bullets
+        self.assertNotIn("free_or_demo", md)
+        self.assertNotIn("｜any｜", md)
+        self.assertNotIn("支持 ? 人", md)
+        self.assertNotIn("简中 —", md)
+        self.assertNotIn("：> ", md)
+        self.assertNotIn("   - ", md)
+        self.assertNotIn("Steam物理互坑·欢乐联机热榜", md)
+        self.assertIn("免费/Demo", md)
+        self.assertIn("不限恐怖", md)
+        # Quote must start on its own line so KOOK renders a proper quote bar
+        self.assertTrue(any(line.startswith("> ") for line in md.splitlines()))
+        # Compact overall length
+        self.assertLess(len(md), 900)
+
+    def test_mild_horror_includes_quirky_horror_and_demo_radar_dedups_fullgame_pair(self):
+        conn = db.init_db(sqlite3.connect(":memory:"))
+        db.upsert_game(
+            conn,
+            {
+                "appid": 3241660,
+                "name": "R.E.P.O.",
+                "online_coop": 1,
+                "price_cny": 35.0,
+                "horror_level": "scary",
+                "tags_json": ["恐怖", "喜剧", "欢乐", "在线合作"],
+                "review_score": 9,
+                "review_tier_zh": "好评如潮",
+            },
+        )
+        db.upsert_game(
+            conn,
+            {
+                "appid": 739630,
+                "name": "Pure Hardcore Horror",
+                "online_coop": 1,
+                "price_cny": 45.0,
+                "horror_level": "scary",
+                "tags_json": ["恐怖", "生存恐怖", "在线合作"],
+                "review_score": 8,
+                "review_tier_zh": "特别好评",
+            },
+        )
+        mild_ids = [r["appid"] for r in db.recommend_games(conn, horror="mild", budget="any", players=2)]
+        self.assertIn(3241660, mild_ids, "Funny/quirky horror co-op should appear for mild horror")
+        self.assertNotIn(739630, mild_ids, "Pure hardcore horror must not appear for mild horror")
+        conn.close()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "dedup.sqlite"
+            log_path = Path(tmp) / "log.json"
+            c = db.init_db(db_path)
+            db.upsert_game(
+                c,
+                {
+                    "appid": 4895870,
+                    "name": "浣熊模拟器 Demo",
+                    "type": "demo",
+                    "is_free": 1,
+                    "has_demo": 1,
+                    "fullgame_appid": 2870790,
+                    "online_coop": 1,
+                    "potential_score": 46.5,
+                    "current_players": 352,
+                    "followers": 9780,
+                },
+            )
+            db.upsert_game(
+                c,
+                {
+                    "appid": 2870790,
+                    "name": "浣熊模拟器",
+                    "type": "game",
+                    "is_free": 0,
+                    "has_demo": 1,
+                    "demo_appid": 4895870,
+                    "online_coop": 1,
+                    "potential_score": 42.0,
+                    "current_players": 352,
+                    "followers": 9780,
+                },
+            )
+            c.close()
+            with mock.patch.multiple(server, DB_PATH=db_path, DEFAULT_DB_PATH=db_path, USER_LOG_PATH=log_path):
+                res = server.discover_potential_demos(max_age_days=None, min_score=0.0, limit=5)
+                self.assertEqual(len(res["items"]), 1, "Demo and its paired fullgame must not appear twice")
+
     def test_session_ignores_unsolicited_chat_and_coerces_non_int_llm_players(self):
         session = kook_bot.KookBotSession(cooldown_sec=0.0)
         self.assertIsNone(session.handle_message("ch-1", "吃饭了吗", is_mentioned=False))

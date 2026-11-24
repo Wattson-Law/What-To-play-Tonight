@@ -225,7 +225,9 @@ def is_playable_game(game: dict) -> bool:
 def recommend_games(conn, *, horror="any", budget="any", players=None, mode="online", tag=None, limit=50):
     sql = f"SELECT * FROM games WHERE is_avoid=0 AND {PLAYABLE_SQL}"
     args = []
-    if horror in {"none", "mild", "scary"}:
+    if horror == "mild":
+        sql += " AND (horror_level='mild' OR (horror_level='scary' AND (tags_json LIKE '%欢乐%' OR tags_json LIKE '%喜剧%')))"
+    elif horror in {"none", "scary"}:
         sql += " AND horror_level=?"
         args.append(horror)
     if budget == "free_or_demo":
@@ -274,7 +276,9 @@ def recommend_potential_demos(
     if max_age_days is not None:
         sql += " AND (release_age_days IS NULL OR release_age_days <= ?)"
         args.append(int(max_age_days))
-    if horror in {"none", "mild", "scary"}:
+    if horror == "mild":
+        sql += " AND (horror_level='mild' OR (horror_level='scary' AND (tags_json LIKE '%欢乐%' OR tags_json LIKE '%喜剧%')))"
+    elif horror in {"none", "scary"}:
         sql += " AND horror_level=?"
         args.append(horror)
     if players:

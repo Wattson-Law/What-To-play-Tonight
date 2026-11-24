@@ -106,7 +106,15 @@ class SteamClient:
     def top_curators(self, start: int = 0, count: int = 20):
         return self._request("curators/ajaxgetcurators/", start=start, count=count, l="schinese", cc="cn")
 
-    def _direct_get(self, url: str, params: dict | None = None, *, cache_key: str | None = None, timeout: float = 12.0):
+    def _direct_get(
+        self,
+        url: str,
+        params: dict | None = None,
+        *,
+        cache_key: str | None = None,
+        timeout: float = 12.0,
+        follow_redirects: bool = False,
+    ):
         key_src = cache_key or (url + json.dumps(params or {}, sort_keys=True))
         cp = self.cache / (hashlib.sha256(key_src.encode()).hexdigest() + ".json")
         if cp.exists():
@@ -122,7 +130,7 @@ class SteamClient:
                 self._last = time.time()
                 with httpx.Client(
                     proxy=self.proxy,
-                    follow_redirects=False,
+                    follow_redirects=follow_redirects,
                     timeout=timeout,
                     headers={"User-Agent": "Mozilla/5.0"},
                     transport=self.transport,
@@ -168,6 +176,7 @@ class SteamClient:
             f"https://steamcommunity.com/games/{int(appid)}/memberslistxml/",
             params={"xml": 1},
             cache_key=f"followers:{int(appid)}",
+            follow_redirects=True,
         )
         if isinstance(raw, str):
             m = re.search(r"<memberCount>(\d+)</memberCount>", raw)
