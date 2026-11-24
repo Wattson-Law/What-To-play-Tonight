@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import argparse
+import datetime
 import json
+import os
+import re
 import sys
 import time
 from pathlib import Path
@@ -17,7 +20,15 @@ from coop_night_picker.constants import (
     REVIEW_TIERS,
     TAG_ZH,
 )
-from coop_night_picker.db import init_db, insert_quote, is_playable_game, upsert_game
+from coop_night_picker.db import (
+    get_previous_demo_metric,
+    init_db,
+    insert_quote,
+    is_playable_game,
+    prune_demo_metrics,
+    record_demo_metric,
+    upsert_game,
+)
 from coop_night_picker.extractor import (
     build_avoid_reasons,
     compute_potential_score,
@@ -32,6 +43,64 @@ from coop_night_picker.extractor import (
     parse_store_page,
 )
 from coop_night_picker.steam_client import SteamClient
+
+
+def _has_cjk(text: str | None) -> bool:
+    return bool(text) and any("\u4e00" <= ch <= "\u9fff" for ch in str(text))
+
+
+def translate_english_descriptions(items: list[tuple[int, str, str]], max_items: int = 25) -> dict[int, str]:
+    """Batch-generate crisp 1-sentence Chinese gameplay summaries for English-only Steam descriptions."""
+    if not items:
+        return {}
+    api_key = (os.getenv("LLM_API_KEY") or os.getenv("GITHUB_TOKEN") or "").strip()
+    if not api_key:
+        return {}
+    try:
+        import httpx
+    except ImportError:
+        return {}
+
+    base_url = (os.getenv("LLM_BASE_URL") or "https://models.github.ai/inference").rstrip("/")
+    default_model = "openai/gpt-4o-mini" if "models.github.ai" in base_url else "gpt-4o-mini"
+    model = os.getenv("LLM_MODEL") or default_model
+    batch = items[: max(1, int(max_items))]
+    payload_lines = [{"appid": int(aid), "name": name, "desc": desc[:260]} for aid, name, desc in batch]
+    prompt = (
+        "你是Steam联机游戏编辑。请把下面每款英文游戏简介总结成一句简洁自然的简体中文核心玩法安利（20~42字，不要剧透、不要加引号、保留核心玩法与联机亮点）。"
+        "严格输出JSON对象，键为字符串appid，值为中文一句话简介，不要输出任何额外解释或代码块。"
+    )
+    try:
+        with httpx.Client(timeout=30.0) as hc:
+            resp = hc.post(
+                f"{base_url}/chat/completions",
+                headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+                json={
+                    "model": model,
+                    "messages": [
+                        {"role": "system", "content": prompt},
+                        {"role": "user", "content": json.dumps(payload_lines, ensure_ascii=False)},
+                    ],
+                    "temperature": 0.2,
+                    "max_tokens": 1400,
+                },
+            )
+            if resp.status_code != 200:
+                return {}
+            content = resp.json()["choices"][0]["message"]["content"].strip()
+            m = re.search(r"\{.*\}", content, re.S)
+            if not m:
+                return {}
+            parsed = json.loads(m.group(0))
+            if not isinstance(parsed, dict):
+                return {}
+            out: dict[int, str] = {}
+            for k, v in parsed.items():
+                if str(k).isdigit() and isinstance(v, str) and v.strip():
+                    out[int(k)] = " ".join(v.split()).strip()[:80]
+            return out
+    except Exception:
+        return {}
 
 
 def _items(raw):
@@ -54,6 +123,13 @@ def main(argv=None):
     args = parser.parse_args(argv)
 
     conn = init_db(args.db)
+    today_str = datetime.date.today().isoformat()
+    # Preserve previous snapshot followers & cached Chinese summaries across daily rebuilds
+    prev_games: dict[int, dict] = {}
+    for r in conn.execute("SELECT appid, followers, short_desc, short_desc_zh FROM games").fetchall():
+        prev_games[int(r["appid"])] = dict(r)
+    pending_translations: list[tuple[int, str, str]] = []
+
     merged: dict[int, dict] = {}
     curator_map: dict[int, list[dict]] = {}
     radar_ids: set[int] = set()
@@ -372,7 +448,20 @@ def main(argv=None):
         age_days = parse_release_age_days(release_str)
         game["release_age_days"] = age_days
 
-        is_demo_candidate = bool(game["has_demo"]) or game.get("type") == "demo" or appid in radar_ids
+        # Exclude old fullgames released >90 days ago that merely happen to have an ancient Demo
+        is_recent_or_unreleased_fullgame_demo = (
+            bool(game["has_demo"])
+            and (age_days is None or age_days <= 90 or bool(game.get("coming_soon")))
+        )
+        is_demo_candidate = game.get("type") == "demo" or appid in radar_ids or is_recent_or_unreleased_fullgame_demo
+
+        prev_row = prev_games.get(appid) or {}
+        short_desc_now = str(game.get("short_desc") or "").strip()
+        if prev_row.get("short_desc_zh") and str(prev_row.get("short_desc") or "").strip() == short_desc_now:
+            game["short_desc_zh"] = prev_row["short_desc_zh"]
+        elif short_desc_now and not _has_cjk(short_desc_now):
+            pending_translations.append((appid, str(game.get("name") or ""), short_desc_now))
+
         early_raw = fixture(appid, "early")
         ccu = 0
         followers = 0
@@ -386,10 +475,19 @@ def main(argv=None):
             ccu_target = int(game["demo_appid"]) if game.get("demo_appid") else appid
             hub_target = int(game["fullgame_appid"]) if game.get("fullgame_appid") else appid
             ccu = int(client.current_players(ccu_target) or 0)
-            followers = int(client.community_followers(hub_target) or 0)
+            live_followers = client.community_followers(hub_target)
+            if live_followers is None:
+                # Preserve previous follower count if Steam Community rate-limited (HTTP 429)
+                followers = int(prev_row.get("followers") or 0)
+            else:
+                followers = int(live_followers)
             news_items = client.app_news(hub_target, count=5)
             cutoff_ts = time.time() - 14 * 86400
             recent_news = sum(1 for item in news_items if float(item.get("date") or 0) >= cutoff_ts)
+
+        prev_metric = get_previous_demo_metric(conn, appid, today_str) if is_demo_candidate else None
+        delta_ccu = max(0, ccu - int(prev_metric["current_players"] or 0)) if prev_metric else 0
+        delta_followers = max(0, followers - int(prev_metric["followers"] or 0)) if prev_metric else 0
 
         potential_score = compute_potential_score(
             current_players=ccu,
@@ -404,9 +502,13 @@ def main(argv=None):
             developers=game.get("developers_json") or [],
             publishers=game.get("publishers_json") or [],
             from_wishlist=appid in wishlist_ids,
+            delta_followers=delta_followers,
+            delta_ccu=delta_ccu,
         )
         game["current_players"] = ccu
         game["followers"] = followers
+        game["delta_ccu"] = delta_ccu
+        game["delta_followers"] = delta_followers
         game["recent_news_count"] = recent_news
         game["potential_score"] = potential_score
         game["is_demo_radar"] = int(is_demo_candidate)
@@ -491,6 +593,8 @@ def main(argv=None):
         kept_linked_ids.update(linked_ids)
         if not args.dry_run:
             upsert_game(conn, game)
+            if is_demo_candidate and (ccu > 0 or followers > 0):
+                record_demo_metric(conn, appid, today_str, current_players=ccu, followers=followers)
             conn.execute("DELETE FROM game_quotes WHERE appid=?", (appid,))
             conn.commit()
             # Deduplicate curator quotes and preserve both positive and negative curator blurbs
@@ -549,9 +653,16 @@ def main(argv=None):
         _enrich_and_persist(appid, seed, is_radar_slice=False)
 
     if not args.dry_run and kept_ids:
+        kept_set = set(kept_ids)
+        to_translate = [item for item in pending_translations if item[0] in kept_set]
+        if to_translate and not root:
+            translated = translate_english_descriptions(to_translate, max_items=25)
+            for aid, zh_desc in translated.items():
+                conn.execute("UPDATE games SET short_desc_zh=? WHERE appid=?", (zh_desc, int(aid)))
         placeholders = ",".join("?" for _ in kept_ids)
         conn.execute(f"DELETE FROM game_quotes WHERE appid NOT IN ({placeholders})", kept_ids)
         conn.execute(f"DELETE FROM games WHERE appid NOT IN ({placeholders})", kept_ids)
+        prune_demo_metrics(conn, keep_dates=14)
         conn.commit()
 
     processed = len(kept_ids)

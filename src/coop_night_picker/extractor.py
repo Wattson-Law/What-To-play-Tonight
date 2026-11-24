@@ -15,10 +15,29 @@ except ImportError:
     BeautifulSoup = None
 
 _CN_NUM = {"双": 2, "两": 2, "二": 2, "三": 3, "四": 4, "五": 5, "六": 6, "八": 8, "十": 10}
+_EN_NUM = {"two": 2, "three": 3, "four": 4, "five": 5, "six": 6, "seven": 7, "eight": 8, "ten": 10, "twelve": 12, "sixteen": 16}
 _NEGATED_PRAISE_RE = re.compile(
     r"(?:不会|绝不|毫不|并不|没让|从未|不至于|无需|没有|并非|绝非|不算)"
     r"(?:让你|让人|令我|令人|显得)?(?:失望|敷衍|半成品|粗制滥造|差评|坐牢|赶工|骗钱|不耐玩)"
 )
+
+
+def _parse_num_token(tok: str) -> int | None:
+    t = str(tok or "").strip().lower()
+    if t.isdigit():
+        return int(t)
+    if t in _EN_NUM:
+        return _EN_NUM[t]
+    if t in _CN_NUM:
+        return _CN_NUM[t]
+    return None
+
+
+def _strip_html(raw: str | None) -> str:
+    if not raw or not isinstance(raw, str):
+        return ""
+    cleaned = re.sub(r"<[^>]+>", " ", raw)
+    return " ".join(html.unescape(cleaned).split())
 
 
 def infer_max_players(text: str | None, categories: list[str] | None = None, tags: list[str] | None = None) -> int | None:
@@ -28,14 +47,15 @@ def infer_max_players(text: str | None, categories: list[str] | None = None, tag
     # Strip perspective phrases like "第一人称 / 第三人称" so "三人" isn't misread as 3 players.
     cleaned_blob = re.sub(r"第[一二三四]人称", " ", blob)
     for pat in (
-        r"(?:1|2|3|4)\s*[-~至到]\s*(\d{1,2})\s*(?:人|名玩家|players?)",
-        r"(?:最多|至多|上限|支持|up\s+to)\s*(\d{1,2})\s*(?:人|名玩家|players?)",
-        r"(\d{1,2})\s*(?:人|players?)\s*(?:在线|本地|同屏|联机|合作|开黑|co-?op)",
+        r"(?:1|2|3|4)\s*(?:[-~–至到]|to)\s*(\d{1,2})\s*(?:人|名玩家|位玩家|players?|friends?)",
+        r"(?:最多可容纳|最多|至多|上限|支持|up\s+to|for\s+up\s+to|with\s+up\s+to)\s*(\d{1,2}|two|three|four|five|six|seven|eight|ten|twelve|sixteen)\s*(?:人|名玩家|位玩家|players?|friends?|people)",
+        r"\b(\d{1,2}|two|three|four|five|six|eight)\s*[-–]\s*players?\b",
+        r"(\d{1,2})\s*(?:人|名玩家|players?)\s*(?:在线|本地|同屏|联机|合作|开黑|co-?op)",
     ):
         m = re.search(pat, cleaned_blob, re.I)
         if m:
-            n = int(m.group(1))
-            if 2 <= n <= 64:
+            n = _parse_num_token(m.group(1))
+            if n is not None and 2 <= n <= 64:
                 return n
     m_cn = re.search(
         r"(?<!第)([双两二三四五六八十])个?人(?!称|类|物|生|工|员|士|民|口|家|情|格|性|设|像|偶|形|体|头|脸|眼|手|脚|们)"
@@ -197,6 +217,10 @@ def parse_appdetails(payload, appid=None):
     except (TypeError, ValueError):
         demo_appid = None
     max_players = infer_max_players(short_desc, categories=category_names, tags=genre_names)
+    if max_players is None:
+        long_desc = _strip_html(d.get("about_the_game") or d.get("detailed_description"))[:2500]
+        if long_desc:
+            max_players = infer_max_players(long_desc, categories=category_names, tags=genre_names)
     return {
         "appid": appid or d.get("steam_appid"),
         "name": html.unescape(str(d.get("name", ""))).strip(),
@@ -348,15 +372,19 @@ def compute_potential_score(
     developers: list[str] | None = None,
     publishers: list[str] | None = None,
     from_wishlist: bool = False,
+    delta_followers: int = 0,
+    delta_ccu: int = 0,
 ) -> float:
-    """Score early-stage Demo potential using live traction, follower proxy, polish, and freshness."""
+    """Score early-stage Demo potential using live traction, follower proxy, 24h velocity, polish, and freshness."""
     ccu = max(0, int(current_players or 0))
     fol = max(0, int(followers or 0))
     news = max(0, int(recent_news_count or 0))
     revs = max(0, int(total_reviews or 0))
     pos = float(positive_pct or 0.0)
+    d_fol = max(0, int(delta_followers or 0))
+    d_ccu = max(0, int(delta_ccu or 0))
 
-    has_traction = ccu >= 3 or fol >= 50 or news >= 1 or (revs >= 5 and pos >= 80.0) or from_wishlist
+    has_traction = ccu >= 3 or fol >= 50 or news >= 1 or d_fol >= 10 or d_ccu >= 5 or (revs >= 5 and pos >= 80.0) or from_wishlist
     if not has_traction and not has_trailer:
         # Zero-traction, no-trailer, no-news fresh Demo -> noise floor
         base_noise = 1.0 if has_schinese else 0.5
@@ -365,6 +393,10 @@ def compute_potential_score(
         return round(min(2.0, base_noise + 0.2 * math.log1p(fol)), 2)
 
     score = 3.0 * math.log1p(ccu) + 2.0 * math.log1p(fol)
+    if d_fol >= 10:
+        score += min(8.0, 1.3 * math.log1p(d_fol))
+    if d_ccu >= 5:
+        score += min(4.0, 0.9 * math.log1p(d_ccu))
     if has_schinese:
         score += 2.0
     if has_trailer:

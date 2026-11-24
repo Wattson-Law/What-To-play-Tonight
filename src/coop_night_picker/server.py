@@ -10,7 +10,7 @@ import urllib.request
 from pathlib import Path
 from typing import Literal, Optional
 
-from . import db, extractor
+from . import db, extractor, state_store
 from .constants import CURATOR_SOURCES, HORROR_TAG_IDS, REVIEW_TIERS
 from .steam_client import SteamClient
 
@@ -44,33 +44,43 @@ def _load_log(path: Path | None = None) -> dict:
     path = Path(path) if path is not None else USER_LOG_PATH
     try:
         value = json.loads(path.read_text(encoding="utf-8"))
-        return value if isinstance(value, dict) else {"records": []}
+        return state_store.normalize_state(value)
     except (FileNotFoundError, json.JSONDecodeError, OSError):
-        return {"records": []}
+        return state_store.normalize_state({})
 
 
-def _records(log: dict) -> list[dict]:
-    records = log.get("records", [])
+def _records(log: dict, scope: str = "default") -> list[dict]:
+    norm = state_store.normalize_state(log)
+    bucket = norm.get("scopes", {}).get(scope or "default") or {}
+    records = bucket.get("records", [])
     if isinstance(records, list):
         return [r for r in records if isinstance(r, dict)]
     return []
 
 
-def _excluded(log: dict) -> set[int]:
+def _excluded(log: dict, scope: str = "default") -> set[int]:
     return {
         int(r["appid"])
-        for r in _records(log)
+        for r in _records(log, scope=scope)
         if r.get("status") in {"played", "avoided"} and str(r.get("appid", "")).isdigit()
     }
 
 
-def _save_log(log: dict, path: Path | None = None) -> None:
+def _save_log(log: dict, path: Path | None = None, *, sync_cloud: bool = True) -> None:
     path = Path(path) if path is not None else USER_LOG_PATH
+    norm = state_store.normalize_state(log)
+    # Mirror default scope into top-level "records" for legacy readers/tests
+    default_recs = (norm.get("scopes", {}).get("default") or {}).get("records", [])
+    disk_payload = {
+        "version": 2,
+        "records": default_recs,
+        "scopes": norm["scopes"],
+    }
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, name = tempfile.mkstemp(prefix=".user_log.", suffix=".tmp", dir=path.parent)
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
-            json.dump(log, fh, ensure_ascii=False, indent=2)
+            json.dump(disk_payload, fh, ensure_ascii=False, indent=2)
             fh.write("\n")
             fh.flush()
             os.fsync(fh.fileno())
@@ -78,6 +88,27 @@ def _save_log(log: dict, path: Path | None = None) -> None:
     finally:
         if os.path.exists(name):
             os.unlink(name)
+    if sync_cloud and path == USER_LOG_PATH:
+        store = state_store.get_default_cloud_store()
+        if store is not None:
+            try:
+                store.push(norm)
+            except Exception:
+                pass
+
+
+def sync_cloud_user_log() -> bool:
+    """Pull cloud-persisted play/dislike logs from GitHub bot-state branch and merge with local."""
+    store = state_store.get_default_cloud_store()
+    if store is None:
+        return False
+    remote = store.pull()
+    if remote is None:
+        return False
+    local = _load_log()
+    merged = state_store.merge_state_payloads(remote, local)
+    _save_log(merged, sync_cloud=False)
+    return True
 
 
 def _download_cloud_snapshot(target_path: Path | None = None, *, use_etag: bool = False) -> bool:
@@ -217,6 +248,7 @@ def _format_game(game, conn=None):
         "online_coop": bool(game.get("online_coop", True)),
         "local_coop": bool(game.get("local_coop")),
         "short_desc": game.get("short_desc") or "",
+        "short_desc_zh": game.get("short_desc_zh") or "",
         "tags": tags,
         "curator_count": int(game.get("curator_count") or len(curators)),
         "curators": curators,
@@ -225,6 +257,8 @@ def _format_game(game, conn=None):
         "release_age_days": game.get("release_age_days"),
         "current_players": int(game.get("current_players") or 0),
         "followers": int(game.get("followers") or 0),
+        "delta_ccu": int(game.get("delta_ccu") or 0),
+        "delta_followers": int(game.get("delta_followers") or 0),
         "recent_news_count": int(game.get("recent_news_count") or 0),
         "has_schinese": bool(game.get("has_schinese")),
         "has_trailer": bool(game.get("has_trailer")),
@@ -304,6 +338,19 @@ def _dedupe_demo_pairs(rows: list[dict]) -> list[dict]:
     return out
 
 
+def _select_display_items(groups: dict, max_total: int = 6) -> list[tuple[int, dict]]:
+    """Select flat (score, game) display pairs in exact markdown rendering order."""
+    selected: list[tuple[int, dict]] = []
+    tier_items = list(groups.items())
+    for score, games in tier_items:
+        if len(selected) >= max_total:
+            break
+        cap = min(2 if len(tier_items) >= 3 else 3, max_total - len(selected))
+        for g in games[:cap]:
+            selected.append((int(score), g))
+    return selected
+
+
 def _markdown(groups, avoid, players, horror, budget, mode="online", tag=None):
     badges = [
         f"`{players}人`",
@@ -334,7 +381,7 @@ def _markdown(groups, avoid, players, horror, budget, mode="online", tag=None):
         else:
             lines.append(f"**{tier['stars']} {tier['zh']}**")
 
-        for i, g in enumerate(batch, 1):
+        for g in batch:
             shown_total += 1
             if g["is_free"]:
                 price = "`免费`"
@@ -367,9 +414,9 @@ def _markdown(groups, avoid, players, horror, budget, mode="online", tag=None):
                     meta_parts.append(f"上线{g['release_age_days']}天")
 
             lines.append("")
-            lines.append(f"**{i}. {_fmt_title(g['name'])}**  {' · '.join(meta_parts)}")
+            lines.append(f"**{shown_total}. {_fmt_title(g['name'])}**  {' · '.join(meta_parts)}")
 
-            desc = _truncate(g.get("short_desc"), 64)
+            desc = _truncate(g.get("short_desc_zh") or g.get("short_desc"), 64)
             steam_url = f"https://store.steampowered.com/app/{g.get('demo_appid') or g['appid']}/"
             if desc:
                 lines.append(f"{desc}  [商店页]({steam_url})")
@@ -411,7 +458,7 @@ def _markdown(groups, avoid, players, horror, budget, mode="online", tag=None):
     else:
         lines.append("• 暂无")
 
-    lines.extend(["", "💡 换条件直接说 `4人 不恐怖 50以内` · 挖新试玩发 `潜力demo`"])
+    lines.extend(["", "💡 直接回 `第2个不好玩，推荐点别的` / `玩过 游戏名` / `换一批` 自动记云端并换新"])
     return "\n".join(lines)
 
 
@@ -501,10 +548,12 @@ def _live_curator_recommend(horror, budget, players, mode, excluded, limit_per_t
 
     for k in list(groups.keys()):
         groups[k] = sorted(groups[k], key=lambda x: x.get("curator_count", 0), reverse=True)[: max(1, int(limit_per_tier))]
+    displayed = [g for _, g in _select_display_items(groups)]
     query = {"horror": horror, "budget": budget, "players": players, "mode": mode, "session_duration": session_duration, "tag": tag}
     return {
         "status": "ok",
         "groups": groups,
+        "recommended": displayed,
         "avoid_list": avoid[:3],
         "query": query,
         "meta": {
@@ -527,6 +576,8 @@ def recommend_coop_games(
     limit_per_tier: int = 3,
     session_duration: Optional[str] = None,
     tag: Optional[str] = None,
+    scope: str = "default",
+    extra_excluded: Optional[list[int]] = None,
 ) -> dict:
     questions = _question_list(horror, budget, players, session_duration)
     if not confirmed and questions:
@@ -542,7 +593,9 @@ def recommend_coop_games(
             "questions": _question_list(horror, budget, players, session_duration),
         }
     log = _load_log()
-    excluded = _excluded(log)
+    excluded = _excluded(log, scope=scope)
+    if extra_excluded:
+        excluded |= {int(x) for x in extra_excluded if str(x).isdigit()}
     conn = _open_snapshot()
     if conn is None:
         if DB_PATH == DEFAULT_DB_PATH:
@@ -606,14 +659,17 @@ def recommend_coop_games(
             )
             or (budget == "any_paid" and not g["is_free"])
         ][:3]
+        displayed = [g for _, g in _select_display_items(groups)]
         query = {"horror": horror, "budget": budget, "players": players, "mode": mode, "session_duration": session_duration, "tag": tag}
         return {
             "status": "ok",
             "groups": groups,
+            "recommended": displayed,
             "avoid_list": avoid,
             "query": query,
             "meta": {
                 "source": "snapshot",
+                "scope": scope,
                 "excluded_appids": sorted(excluded),
                 "count": sum(map(len, groups.values())),
                 "session_duration": session_duration,
@@ -697,21 +753,85 @@ def resolve_game(query: str, limit: int = 5) -> dict:
     return result
 
 
-def log_play(appid: int, status: Literal["played", "avoided", "wishlist"], note: str = "") -> dict:
+def _lookup_game_name(appid: int) -> str:
+    conn = _open_snapshot()
+    if conn is None:
+        return ""
+    try:
+        g = db.get_game(conn, int(appid))
+        return str(g.get("name") or "").strip() if g else ""
+    finally:
+        conn.close()
+
+
+def log_play(
+    appid: int,
+    status: Literal["played", "avoided", "wishlist"],
+    note: str = "",
+    scope: str = "default",
+    name: str = "",
+) -> dict:
     if status not in {"played", "avoided", "wishlist"}:
         return {"status": "error", "message": "status 必须是 played、avoided 或 wishlist。"}
+    aid = int(appid)
+    scope_key = scope or "default"
+    game_name = str(name or "").strip() or _lookup_game_name(aid)
+    now_ts = time.time()
     log = _load_log()
-    records = _records(log)
-    records.append({"appid": int(appid), "status": status, "note": note})
-    log["records"] = records
+    bucket = log["scopes"].setdefault(scope_key, {"records": [], "deleted": {}})
+    records = [r for r in bucket.get("records", []) if int(r.get("appid", 0)) != aid]
+    records.append(
+        {
+            "appid": aid,
+            "status": status,
+            "name": game_name,
+            "note": str(note or "").strip(),
+            "updated_at": now_ts,
+        }
+    )
+    bucket["records"] = records
+    bucket.setdefault("deleted", {}).pop(str(aid), None)
     _save_log(log)
     return {
         "status": "saved",
-        "appid": int(appid),
+        "appid": aid,
+        "name": game_name,
+        "scope": scope_key,
         "saved_status": status,
         "excluded": status in {"played", "avoided"},
-        "excluded_appid": int(appid) if status in {"played", "avoided"} else None,
+        "excluded_appid": aid if status in {"played", "avoided"} else None,
     }
+
+
+def unlog_play(appid: int, scope: str = "default") -> dict:
+    aid = int(appid)
+    scope_key = scope or "default"
+    log = _load_log()
+    bucket = log["scopes"].setdefault(scope_key, {"records": [], "deleted": {}})
+    before = bucket.get("records", [])
+    removed = [r for r in before if int(r.get("appid", 0)) == aid]
+    if not removed:
+        return {"status": "not_found", "appid": aid, "scope": scope_key}
+    bucket["records"] = [r for r in before if int(r.get("appid", 0)) != aid]
+    bucket.setdefault("deleted", {})[str(aid)] = time.time()
+    _save_log(log)
+    return {
+        "status": "removed",
+        "appid": aid,
+        "name": removed[-1].get("name") or _lookup_game_name(aid),
+        "scope": scope_key,
+    }
+
+
+def list_play_log(scope: str = "default") -> dict:
+    scope_key = scope or "default"
+    log = _load_log()
+    records = sorted(
+        _records(log, scope=scope_key),
+        key=lambda r: float(r.get("updated_at") or 0.0),
+        reverse=True,
+    )
+    return {"status": "ok", "scope": scope_key, "records": records}
 
 
 def _demo_radar_markdown(items: list[dict], max_age_days: int | None, horror: str, players: int | None, mode: str, tag: str | None = None, widened: bool = False) -> str:
@@ -741,16 +861,24 @@ def _demo_radar_markdown(items: list[dict], max_age_days: int | None, horror: st
         signal_parts: list[str] = []
         ccu = int(g.get("current_players") or 0)
         fol = int(g.get("followers") or 0)
+        d_ccu = int(g.get("delta_ccu") or 0)
+        d_fol = int(g.get("delta_followers") or 0)
         news = int(g.get("recent_news_count") or 0)
         if ccu > 0:
-            signal_parts.append(f"在线 **{ccu}** 人")
+            ccu_txt = f"在线 **{ccu}** 人"
+            if d_ccu >= 15:
+                ccu_txt += f"（↑+{d_ccu}）"
+            signal_parts.append(ccu_txt)
         if fol > 0:
             est_low = fol * 7
             est_high = fol * 12
-            if est_low >= 1000:
-                signal_parts.append(f"关注 **{fol}** 人（约 {est_low / 1000:.1f}k–{est_high / 1000:.1f}k 愿望单）")
+            if d_fol >= 10:
+                fol_txt = f"关注 **{fol}** 人（↑+{d_fol}/天）"
+            elif est_low >= 1000:
+                fol_txt = f"关注 **{fol}** 人（约 {est_low / 1000:.1f}k–{est_high / 1000:.1f}k 愿望单）"
             else:
-                signal_parts.append(f"关注 **{fol}** 人")
+                fol_txt = f"关注 **{fol}** 人"
+            signal_parts.append(fol_txt)
         if news > 0:
             signal_parts.append(f"近14天更新 {news} 次")
         if g.get("has_schinese"):
@@ -764,11 +892,12 @@ def _demo_radar_markdown(items: list[dict], max_age_days: int | None, horror: st
 
         target_id = g.get("demo_appid") or g["appid"]
         steam_url = f"https://store.steampowered.com/app/{target_id}/"
-        desc = _truncate(g.get("short_desc"), 72)
+        desc = _truncate(g.get("short_desc_zh") or g.get("short_desc"), 72)
         if desc:
             lines.append(f"{desc}  [去试玩]({steam_url})")
         else:
             lines.append(f"🔗 [前往 Steam 试玩]({steam_url})")
+    lines.extend(["", "💡 直接回 `第2个不好玩，推荐点别的` / `换一批` 自动记录并换新"])
     return "\n".join(lines)
 
 
@@ -780,10 +909,14 @@ def discover_potential_demos(
     tag: Optional[str] = None,
     min_score: float = 8.0,
     limit: int = 6,
+    scope: str = "default",
+    extra_excluded: Optional[list[int]] = None,
 ) -> dict:
-    """发现刚上线（1–14天）或处于试玩阶段的高潜力小而美 Demo，按实时在线/本体关注/活跃更新综合排序。"""
+    """发现刚上线（1–14天）或处于试玩阶段的高潜力小而美 Demo，按实时在线/本体关注/日增速综合排序。"""
     log = _load_log()
-    excluded = _excluded(log)
+    excluded = _excluded(log, scope=scope)
+    if extra_excluded:
+        excluded |= {int(x) for x in extra_excluded if str(x).isdigit()}
     conn = _open_snapshot()
     if conn is None:
         return {
@@ -855,6 +988,8 @@ if mcp is not None:
     get_game_card = mcp.tool()(get_game_card)
     resolve_game = mcp.tool()(resolve_game)
     log_play = mcp.tool()(log_play)
+    unlog_play = mcp.tool()(unlog_play)
+    list_play_log = mcp.tool()(list_play_log)
     tonight_playbook = mcp.prompt()(tonight_playbook)
 
 

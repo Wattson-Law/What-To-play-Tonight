@@ -114,6 +114,8 @@ class SteamClient:
         cache_key: str | None = None,
         timeout: float = 12.0,
         follow_redirects: bool = False,
+        min_spacing: float | None = None,
+        extra_retries: int = 0,
     ):
         key_src = cache_key or (url + json.dumps(params or {}, sort_keys=True))
         cp = self.cache / (hashlib.sha256(key_src.encode()).hexdigest() + ".json")
@@ -122,9 +124,11 @@ class SteamClient:
             return x.get("__text__", "") if isinstance(x, dict) and "__text__" in x else x
         if httpx is None:
             return None
-        for attempt in range(self.retries + 1):
+        total_attempts = self.retries + extra_retries + 1
+        spacing = min_spacing if min_spacing is not None else min(self.throttle, 0.5)
+        for attempt in range(total_attempts):
             try:
-                sleep_s = max(0.0, min(self.throttle, 0.5) - (time.time() - self._last))
+                sleep_s = max(0.0, spacing - (time.time() - self._last))
                 if sleep_s > 0:
                     time.sleep(sleep_s)
                 self._last = time.time()
@@ -148,9 +152,17 @@ class SteamClient:
                         encoding="utf8",
                     )
                     return d
+                if r.status_code == 429 and attempt + 1 < total_attempts:
+                    retry_after = r.headers.get("Retry-After")
+                    try:
+                        wait = min(10.0, max(2.0, float(retry_after))) if retry_after else min(3.0 * (attempt + 1), 8.0)
+                    except (TypeError, ValueError):
+                        wait = min(3.0 * (attempt + 1), 8.0)
+                    time.sleep(wait)
+                    continue
             except Exception:
                 pass
-            if attempt < self.retries:
+            if attempt + 1 < total_attempts:
                 time.sleep(min(2**attempt, 4))
         return None
 
@@ -177,6 +189,8 @@ class SteamClient:
             params={"xml": 1},
             cache_key=f"followers:{int(appid)}",
             follow_redirects=True,
+            min_spacing=min(max(self.throttle, 0.0), 1.1) if self.throttle > 0 else 0.0,
+            extra_retries=1,
         )
         if isinstance(raw, str):
             m = re.search(r"<memberCount>(\d+)</memberCount>", raw)

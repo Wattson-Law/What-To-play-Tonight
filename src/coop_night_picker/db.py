@@ -29,6 +29,7 @@ SCHEMA = """CREATE TABLE IF NOT EXISTS games (
     schinese_pct REAL,
     schinese_total INTEGER,
     short_desc TEXT,
+    short_desc_zh TEXT,
     categories_json TEXT,
     tags_json TEXT,
     avoid_reasons_json TEXT,
@@ -42,6 +43,8 @@ SCHEMA = """CREATE TABLE IF NOT EXISTS games (
     release_age_days INTEGER,
     current_players INTEGER DEFAULT 0,
     followers INTEGER DEFAULT 0,
+    delta_ccu INTEGER DEFAULT 0,
+    delta_followers INTEGER DEFAULT 0,
     recent_news_count INTEGER DEFAULT 0,
     has_schinese INTEGER DEFAULT 0,
     has_trailer INTEGER DEFAULT 0,
@@ -63,8 +66,16 @@ CREATE TABLE IF NOT EXISTS game_quotes (
     review_url TEXT NOT NULL,
     FOREIGN KEY (appid) REFERENCES games(appid)
 );
+CREATE TABLE IF NOT EXISTS demo_metrics_history (
+    appid INTEGER NOT NULL,
+    snapshot_date TEXT NOT NULL,
+    current_players INTEGER DEFAULT 0,
+    followers INTEGER DEFAULT 0,
+    PRIMARY KEY (appid, snapshot_date)
+);
 CREATE INDEX IF NOT EXISTS idx_games_filter ON games(online_coop,horror_level,is_free,has_demo,review_score DESC);
-CREATE INDEX IF NOT EXISTS idx_quotes_appid ON game_quotes(appid,voted_up);"""
+CREATE INDEX IF NOT EXISTS idx_quotes_appid ON game_quotes(appid,voted_up);
+CREATE INDEX IF NOT EXISTS idx_demo_metrics_date ON demo_metrics_history(appid,snapshot_date DESC);"""
 
 JSON_FIELDS = {
     "categories_json",
@@ -92,6 +103,7 @@ def init_db(conn_or_path):
     c.executescript(SCHEMA)
     existing_cols = {r[1] for r in c.execute("PRAGMA table_info(games)")}
     migrations = [
+        ("short_desc_zh", "TEXT"),
         ("curator_count", "INTEGER DEFAULT 0"),
         ("curators_json", "TEXT"),
         ("coming_soon", "INTEGER DEFAULT 0"),
@@ -99,6 +111,8 @@ def init_db(conn_or_path):
         ("release_age_days", "INTEGER"),
         ("current_players", "INTEGER DEFAULT 0"),
         ("followers", "INTEGER DEFAULT 0"),
+        ("delta_ccu", "INTEGER DEFAULT 0"),
+        ("delta_followers", "INTEGER DEFAULT 0"),
         ("recent_news_count", "INTEGER DEFAULT 0"),
         ("has_schinese", "INTEGER DEFAULT 0"),
         ("has_trailer", "INTEGER DEFAULT 0"),
@@ -113,6 +127,35 @@ def init_db(conn_or_path):
             c.execute(f"ALTER TABLE games ADD COLUMN {col_name} {col_def}")
     c.commit()
     return c
+
+
+def record_demo_metric(conn, appid: int, snapshot_date: str, *, current_players: int = 0, followers: int = 0) -> None:
+    conn.execute(
+        "INSERT INTO demo_metrics_history (appid, snapshot_date, current_players, followers) VALUES (?,?,?,?) "
+        "ON CONFLICT(appid, snapshot_date) DO UPDATE SET current_players=excluded.current_players, followers=excluded.followers",
+        (int(appid), str(snapshot_date), int(current_players or 0), int(followers or 0)),
+    )
+    conn.commit()
+
+
+def get_previous_demo_metric(conn, appid: int, before_date: str) -> dict | None:
+    row = conn.execute(
+        "SELECT snapshot_date, current_players, followers FROM demo_metrics_history "
+        "WHERE appid=? AND snapshot_date < ? ORDER BY snapshot_date DESC LIMIT 1",
+        (int(appid), str(before_date)),
+    ).fetchone()
+    return dict(row) if row else None
+
+
+def prune_demo_metrics(conn, keep_dates: int = 14) -> None:
+    rows = conn.execute(
+        "SELECT DISTINCT snapshot_date FROM demo_metrics_history ORDER BY snapshot_date DESC LIMIT ?",
+        (max(1, int(keep_dates)),),
+    ).fetchall()
+    if len(rows) >= keep_dates:
+        oldest_keep = rows[-1][0]
+        conn.execute("DELETE FROM demo_metrics_history WHERE snapshot_date < ?", (oldest_keep,))
+        conn.commit()
 
 
 def _encode(d):

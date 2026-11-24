@@ -89,9 +89,24 @@ _BOT_DISPLAY_MENTION_RE = re.compile(r"@What\s+to\s+play\b", re.I)
 _UNMENTIONED_CMD_RE = re.compile(
     r"(?:今晚玩什么|今晚玩啥|开黑玩什么|开黑玩啥|推荐联机|推荐个联机|联机游戏推荐|"
     r"潜力\s*(?:demo|试玩|新游|小游戏)|小而美|新\s*demo|最新\s*demo|demo\s*雷达|新试玩|挖宝|"
-    r"^/(?:start|help)\b|^搜\s+\S+|^详情\s*\d{3,10}\b|^(?:玩过|避雷|拉黑|想玩)\s*\d{3,10}\b)",
+    r"^/(?:start|help)\b|^搜\s+\S+|^详情\s*\d{3,10}\b|^(?:玩过|避雷|拉黑|想玩)\s*\d{3,10}\b|"
+    r"^(?:已记录|我的记录|玩过列表|避雷名单|已排除|撤销|换一批)$)",
     re.I,
 )
+_FOLLOWUP_FEEDBACK_RE = re.compile(
+    r"(?:不好玩|没意思|不想玩|不喜欢|不感兴趣|别推|劝退|无聊|玩过|已玩|打过|通关|"
+    r"换一批|推荐点?别的|换点别的|换一个|换几个|再推几个|来点别的|撤销|撤回|取消排除|取消避雷)",
+    re.I,
+)
+_REROLL_WORDS_RE = re.compile(r"(?:换一批|推荐点?别的|换点别的|换一个|换几个|再推|来点别的|其他游戏|别的吧)", re.I)
+_BATCH_TARGET_RE = re.compile(r"(?:这些|这几个|这批|全都|全部|都玩过|都不好玩|都不喜欢|都不想玩|都别推|都没意思)")
+_PLAYED_WORDS_RE = re.compile(r"(?:玩过了?|已玩|打过了?|通关了?|通了)")
+_DISLIKE_WORDS_RE = re.compile(r"(?:不好玩|没意思|不想玩|不喜欢|不感兴趣|别推了?|避雷|拉黑|劝退|无聊|\bpass\b)", re.I)
+_WISHLIST_WORDS_RE = re.compile(r"(?:收藏|加愿望单)")
+_LIST_LOG_RE = re.compile(r"^(?:查看|看看)?(?:已记录|我的记录|玩过列表|避雷名单|已排除|排除列表|记录列表)$")
+_UNDO_RE = re.compile(r"^(?:撤销|撤回|恢复|取消排除|取消避雷|取消玩过)(?:\s+(.+))?$")
+_CN_IDX_MAP = {"一": 1, "二": 2, "两": 2, "三": 3, "四": 4, "五": 5, "六": 6}
+_FEEDBACK_TTL_SECONDS = 900.0
 _BARE_GREETINGS = {"今晚玩什么", "今晚玩啥", "玩什么", "玩啥", "推荐", "在吗", "说话", "/start", "/help", "你好", "hi", "hello"}
 _VALID_HORROR = {"none", "mild", "scary", "any"}
 _VALID_BUDGET = {"free_or_demo", "under_50", "any_paid", "any"}
@@ -107,7 +122,87 @@ def _strip_mentions(text: str, bot_name: str | None = None) -> str:
     return " ".join(cleaned.split()).strip()
 
 
-def parse_intent_from_text(text: str, defaults: dict[str, Any] | None = None, bot_name: str | None = None) -> dict[str, Any]:
+def _parse_feedback_intent(cleaned: str, recent_recs: list[dict[str, Any]] | None = None) -> dict[str, Any] | None:
+    """Parse natural-language feedback ('第2个不好玩推荐点别的', '浣熊模拟器玩过了', '换一批', '撤销', '已记录')."""
+    if not cleaned:
+        return None
+    if _LIST_LOG_RE.match(cleaned):
+        return {"action": "list_log"}
+    m_undo = _UNDO_RE.match(cleaned)
+    if m_undo:
+        return {"action": "undo", "target_text": (m_undo.group(1) or "").strip()}
+
+    # Strip filter-condition negations ("不想玩恐怖", "不玩免费") so they don't look like game dislikes
+    probe = _HORROR_NEG_RE.sub(" ", cleaned)
+    probe = _PAID_NOT_FREE_RE.sub(" ", probe)
+
+    has_played = bool(_PLAYED_WORDS_RE.search(probe))
+    has_dislike = bool(_DISLIKE_WORDS_RE.search(probe))
+    has_wishlist = bool(_WISHLIST_WORDS_RE.search(probe))
+    wants_reroll = bool(_REROLL_WORDS_RE.search(probe))
+    wants_batch_skip = "换一批" in cleaned or bool(_BATCH_TARGET_RE.search(cleaned))
+
+    if not (has_played or has_dislike or has_wishlist or wants_reroll):
+        return None
+
+    # Neutral reroll with no played/dislike sentiment ("换一批", "推荐点别的")
+    if wants_reroll and not (has_played or has_dislike or has_wishlist):
+        return {"action": "reroll", "batch_skip": True}
+
+    status = "played" if has_played else ("avoided" if has_dislike else "wishlist")
+    recs = list(recent_recs or [])
+    is_batch = bool(_BATCH_TARGET_RE.search(cleaned))
+
+    # 1. Extract explicit 1-based indices ("第2个", "2不好玩", "第一个和第三个")
+    indices: list[int] = []
+    for m in re.finditer(r"第\s*([1-6一二两三四五六])\s*[个号]?", cleaned):
+        raw = m.group(1)
+        idx = int(raw) if raw.isdigit() else _CN_IDX_MAP.get(raw, 0)
+        if 1 <= idx <= 6 and idx not in indices:
+            indices.append(idx)
+    if not indices:
+        m_lead = re.match(r"^([1-6])\s*[个号]?\s*(?:不好玩|玩过|已玩|没意思|不想玩|不喜欢|避雷|拉黑|别推|不感兴趣|pass)", cleaned, re.I)
+        if m_lead:
+            indices.append(int(m_lead.group(1)))
+
+    # 2. Extract explicit AppID if present
+    m_aid = re.search(r"\b(\d{4,10})\b", cleaned)
+    explicit_appid = int(m_aid.group(1)) if m_aid else None
+
+    # 3. Extract candidate game name by stripping feedback / reroll / punctuation noise
+    name_guess = cleaned
+    for pat in (
+        _REROLL_WORDS_RE,
+        _BATCH_TARGET_RE,
+        _PLAYED_WORDS_RE,
+        _DISLIKE_WORDS_RE,
+        _WISHLIST_WORDS_RE,
+        re.compile(r"第\s*[1-6一二两三四五六]\s*[个号]?"),
+        re.compile(r"(?:这个|那个|这款|那款|这游戏|这个游戏|游戏|感觉|觉得|好像|有点|太|很|真的|已经|我们|我都|都|也|就|把|给|我|吧|啊|呢|了|的)"),
+    ):
+        name_guess = pat.sub(" ", name_guess)
+    name_guess = re.sub(r"[《》「」『』\[\]()（）,，。!！?？、:：;；~～]+", " ", name_guess)
+    name_guess = " ".join(name_guess.split()).strip()
+
+    return {
+        "action": "feedback",
+        "status": status,
+        "indices": indices,
+        "is_batch": is_batch,
+        "explicit_appid": explicit_appid,
+        "name_guess": name_guess,
+        "wants_reroll": wants_reroll,
+        "wants_batch_skip": wants_batch_skip,
+        "raw_text": cleaned,
+    }
+
+
+def parse_intent_from_text(
+    text: str,
+    defaults: dict[str, Any] | None = None,
+    bot_name: str | None = None,
+    recent_recs: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
     """Deterministically parse KOOK user message into tool intent & parameters."""
     cleaned = _strip_mentions(text, bot_name=bot_name)
     low = cleaned.lower()
@@ -116,7 +211,7 @@ def parse_intent_from_text(text: str, defaults: dict[str, Any] | None = None, bo
     if m_card:
         return {"action": "card", "appid": int(m_card.group(1))}
 
-    m_log = re.search(r"(玩过|已玩|避雷|拉黑|想玩)\s*(\d{3,10})", cleaned)
+    m_log = re.search(r"^(玩过|已玩|避雷|拉黑|想玩)\s*(\d{3,10})$", cleaned)
     if m_log:
         word, aid = m_log.group(1), int(m_log.group(2))
         status = "played" if word in {"玩过", "已玩"} else ("avoided" if word in {"避雷", "拉黑"} else "wishlist")
@@ -125,6 +220,10 @@ def parse_intent_from_text(text: str, defaults: dict[str, Any] | None = None, bo
     m_search = re.search(r"^(?:搜|搜索|查|查找)\s+(.+)$", cleaned)
     if m_search:
         return {"action": "search", "query": m_search.group(1).strip()}
+
+    fb = _parse_feedback_intent(cleaned, recent_recs=recent_recs)
+    if fb is not None:
+        return fb
 
     params: dict[str, Any] = dict(defaults or {})
 
@@ -258,36 +357,181 @@ def call_llm_for_params(user_text: str) -> dict[str, Any] | None:
 
 
 class KookBotSession:
-    """Stateful KOOK channel coordinator with rate limiting."""
+    """Stateful KOOK channel coordinator with rate limiting and feedback memory."""
 
     def __init__(self, cooldown_sec: float = 1.5, pending_ttl_sec: float = PENDING_TTL_SECONDS, bot_name: str | None = None):
         self.pending_channels: dict[str, dict[str, Any]] = {}
         self.pending_since: dict[str, float] = {}
         self.last_reply_at: dict[str, float] = {}
+        self.last_recommendations: dict[str, list[dict[str, Any]]] = {}
+        self.last_rec_at: dict[str, float] = {}
+        self.last_query: dict[str, dict[str, Any]] = {}
+        self.session_shown: dict[str, set[int]] = {}
+        self.seen_games_cache: dict[str, dict[int, str]] = {}
         self.cooldown_sec = cooldown_sec
         self.pending_ttl_sec = pending_ttl_sec
         self.bot_name = bot_name
 
-    def handle_message(self, channel_id: str, text: str, is_mentioned: bool = True) -> str | None:
+    def _active_recent_recs(self, channel_id: str, now: float) -> list[dict[str, Any]]:
+        recs = self.last_recommendations.get(channel_id) or []
+        if recs and now - self.last_rec_at.get(channel_id, 0.0) <= _FEEDBACK_TTL_SECONDS:
+            return recs
+        return []
+
+    def _remember_recommendations(
+        self,
+        channel_id: str,
+        now: float,
+        action: str,
+        params: dict[str, Any],
+        res: dict[str, Any],
+        *,
+        reset_session_shown: bool = False,
+    ) -> list[dict[str, Any]]:
+        if action == "potential_demos":
+            raw_items = res.get("items") or []
+        else:
+            raw_items = res.get("recommended") or [
+                g for values in (res.get("groups") or {}).values() for g in values
+            ]
+        compact = [
+            {"appid": int(g["appid"]), "name": str(g.get("name") or "").strip()}
+            for g in raw_items
+            if isinstance(g, dict) and g.get("appid") is not None
+        ]
+        if compact:
+            self.last_recommendations[channel_id] = compact
+            self.last_rec_at[channel_id] = now
+            self.last_query[channel_id] = {"action": action, "params": dict(params)}
+            cache = self.seen_games_cache.setdefault(channel_id, {})
+            for item in compact:
+                cache[item["appid"]] = item["name"]
+        if reset_session_shown:
+            self.session_shown[channel_id] = set()
+        return compact
+
+    def _run_query(
+        self,
+        channel_id: str,
+        scope_key: str,
+        now: float,
+        action: str,
+        params: dict[str, Any],
+        *,
+        extra_excluded: set[int] | None = None,
+        reset_session_shown: bool = False,
+    ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+        extra_list = sorted(extra_excluded) if extra_excluded else None
+        if action == "potential_demos":
+            res = server.discover_potential_demos(
+                max_age_days=14,
+                horror=params.get("horror", "any"),
+                players=_coerce_players(params.get("players"), 0) if params.get("players") else None,
+                mode=params.get("mode", "online"),
+                tag=params.get("tag"),
+                limit=6,
+                scope=scope_key,
+                extra_excluded=extra_list,
+            )
+        else:
+            res = server.recommend_coop_games(
+                horror=params.get("horror", "any"),
+                budget=params.get("budget", "any"),
+                players=_coerce_players(params.get("players"), 4),
+                mode=params.get("mode", "online"),
+                tag=params.get("tag"),
+                confirmed=True,
+                limit_per_tier=3,
+                scope=scope_key,
+                extra_excluded=extra_list,
+            )
+        shown = self._remember_recommendations(
+            channel_id, now, action, params, res, reset_session_shown=reset_session_shown
+        )
+        return res, shown
+
+    def _resolve_feedback_targets(
+        self,
+        channel_id: str,
+        intent: dict[str, Any],
+        recent_recs: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        if intent.get("is_batch") and recent_recs:
+            return list(recent_recs)
+
+        indices = intent.get("indices") or []
+        if indices and recent_recs:
+            picked = [recent_recs[i - 1] for i in indices if 1 <= i <= len(recent_recs)]
+            if picked:
+                return picked
+
+        aid = intent.get("explicit_appid")
+        seen_cache = self.seen_games_cache.get(channel_id) or {}
+        if aid:
+            return [{"appid": int(aid), "name": seen_cache.get(int(aid), "")}]
+
+        raw_low = str(intent.get("raw_text") or "").lower()
+        name_guess = str(intent.get("name_guess") or "").strip()
+        name_guess_low = name_guess.lower()
+
+        # Match against recently recommended or previously seen games in this channel
+        candidates = list(recent_recs) + [
+            {"appid": k, "name": v}
+            for k, v in seen_cache.items()
+            if all(r["appid"] != k for r in recent_recs)
+        ]
+        for rec in candidates:
+            rname = str(rec.get("name") or "").strip()
+            if not rname:
+                continue
+            r_low = rname.lower()
+            r_base = re.sub(r"\s*demo\s*$", "", r_low).strip()
+            if (len(r_low) >= 2 and r_low in raw_low) or (len(r_base) >= 2 and r_base in raw_low):
+                return [rec]
+            if name_guess_low and (name_guess_low in r_low or r_low in name_guess_low):
+                return [rec]
+
+        # Lookup named game in local DB / Steam search
+        if len(name_guess) >= 2:
+            res = server.resolve_game(name_guess, limit=1)
+            items = res.get("items") or []
+            if items and items[0].get("appid"):
+                return [{"appid": int(items[0]["appid"]), "name": str(items[0].get("name") or name_guess)}]
+
+        # Pronoun fallback ("这个不好玩，推荐点别的") when we just recommended a list
+        if recent_recs:
+            return [recent_recs[0]]
+        return []
+
+    def handle_message(
+        self,
+        channel_id: str,
+        text: str,
+        is_mentioned: bool = True,
+        scope: str | None = None,
+    ) -> str | None:
         now = time.time()
+        scope_key = scope or "default"
         if channel_id in self.pending_channels:
             since = self.pending_since.get(channel_id, now)
             if now - since > self.pending_ttl_sec:
                 self.pending_channels.pop(channel_id, None)
                 self.pending_since.pop(channel_id, None)
         in_pending = channel_id in self.pending_channels
+        recent_recs = self._active_recent_recs(channel_id, now)
         stripped = (text or "").strip()
         if re.search(r"\((?:met|rol)\)\d+\((?:met|rol)\)", stripped) or _BOT_DISPLAY_MENTION_RE.search(stripped):
             is_mentioned = True
-        if not is_mentioned and not in_pending and not _UNMENTIONED_CMD_RE.search(stripped):
+        is_followup_feedback = bool(recent_recs) and bool(_FOLLOWUP_FEEDBACK_RE.search(stripped))
+        if not is_mentioned and not in_pending and not is_followup_feedback and not _UNMENTIONED_CMD_RE.search(stripped):
             return None
-        # Cooldown only guards unsolicited spam; while a dialog is open the user is answering us.
-        if not in_pending and now - self.last_reply_at.get(channel_id, 0.0) < self.cooldown_sec:
+        # Cooldown only guards unsolicited spam; while a dialog or follow-up is open the user is answering us.
+        if not in_pending and not is_followup_feedback and now - self.last_reply_at.get(channel_id, 0.0) < self.cooldown_sec:
             return None
 
         # Fresh @mention starts a clean query instead of leaking stale filters from an earlier dialog.
         prior = None if is_mentioned else self.pending_channels.get(channel_id)
-        intent = parse_intent_from_text(stripped, defaults=prior, bot_name=self.bot_name)
+        intent = parse_intent_from_text(stripped, defaults=prior, bot_name=self.bot_name, recent_recs=recent_recs)
 
         if intent["action"] == "card":
             self.last_reply_at[channel_id] = now
@@ -350,22 +594,126 @@ class KookBotSession:
 
         if intent["action"] == "log":
             self.last_reply_at[channel_id] = now
-            server.log_play(intent["appid"], intent["status"])
+            saved = server.log_play(intent["appid"], intent["status"], scope=scope_key)
             label = {"played": "已玩过（后续自动排除）", "avoided": "已避雷（后续自动排除）", "wishlist": "想玩清单"}[intent["status"]]
-            return f"✅ 已记录 AppID `{intent['appid']}` 为 **{label}**！"
+            title = server._fmt_title(saved["name"]) if saved.get("name") else f"AppID `{intent['appid']}`"
+            return f"✅ 已云端记录 **{title}** 为 **{label}**！（发 `撤销` 可撤回）"
+
+        if intent["action"] == "list_log":
+            self.last_reply_at[channel_id] = now
+            recs = server.list_play_log(scope=scope_key).get("records") or []
+            if not recs:
+                return "📋 本群还没有已玩过或不想玩的记录。推荐结果后直接回复 `第2个不好玩，推荐点别的` 或 `玩过 游戏名` 就能自动云端记录！"
+            status_badge = {"played": "✅ 已玩过", "avoided": "🚫 不感兴趣", "wishlist": "⭐ 想玩"}
+            lines = [f"📋 **本群云端记录（共 {len(recs)} 款）**"]
+            for r in recs[:15]:
+                name = server._fmt_title(r["name"]) if r.get("name") else f"AppID {r['appid']}"
+                lines.append(f"• {status_badge.get(r.get('status', ''), r.get('status', ''))}  **{name}**  `{r['appid']}`")
+            if len(recs) > 15:
+                lines.append(f"…以及另外 {len(recs) - 15} 款")
+            lines.append("\n💡 发 `撤销` 撤回最新一条，或 `取消排除 <AppID/游戏名>` 恢复推荐。")
+            return "\n".join(lines)
+
+        if intent["action"] == "undo":
+            self.last_reply_at[channel_id] = now
+            target_text = str(intent.get("target_text") or "").strip()
+            recs = server.list_play_log(scope=scope_key).get("records") or []
+            if not recs:
+                return "当前没有可撤销的记录。"
+            target_rec = None
+            if not target_text:
+                target_rec = recs[0]
+            else:
+                m_id = re.search(r"\d{3,10}", target_text)
+                if m_id:
+                    want_id = int(m_id.group(0))
+                    target_rec = next((r for r in recs if int(r["appid"]) == want_id), None)
+                if target_rec is None:
+                    tl = target_text.lower()
+                    target_rec = next(
+                        (r for r in recs if r.get("name") and (tl in r["name"].lower() or r["name"].lower() in tl)),
+                        None,
+                    )
+            if target_rec is None:
+                return f"没有在已记录清单中找到「{target_text}」，发 `已记录` 可查看全部记录。"
+            res_undo = server.unlog_play(int(target_rec["appid"]), scope=scope_key)
+            name = server._fmt_title(res_undo["name"]) if res_undo.get("name") else f"AppID `{target_rec['appid']}`"
+            return f"↩️ 已撤销 **{name}**（`{target_rec['appid']}`）的记录，后续可重新推荐。"
+
+        if intent["action"] == "reroll":
+            self.last_reply_at[channel_id] = now
+            last_q = self.last_query.get(channel_id)
+            if not last_q:
+                return "还没开始筛选呢，直接发一句条件就行（例如：`4人 不恐怖 50以内` 或 `潜力demo`）！"
+            shown_set = self.session_shown.setdefault(channel_id, set())
+            for r in recent_recs:
+                shown_set.add(int(r["appid"]))
+            res, shown = self._run_query(
+                channel_id,
+                scope_key,
+                now,
+                last_q["action"],
+                last_q["params"],
+                extra_excluded=shown_set,
+                reset_session_shown=False,
+            )
+            if res.get("status") != "ok" or not shown or not res.get("markdown_preview"):
+                self.session_shown[channel_id] = set()
+                return "这组条件下的备选都看完啦！可以换个筛选条件，或者发 `@我 潜力demo` 挖刚上架的新试玩。"
+            return res["markdown_preview"]
+
+        if intent["action"] == "feedback":
+            self.last_reply_at[channel_id] = now
+            targets = self._resolve_feedback_targets(channel_id, intent, recent_recs)
+            if not targets:
+                return "没识别到具体哪款游戏，可以直接说 `第2个不好玩，推荐点别的` 或 `玩过 游戏名`。"
+            status = intent["status"]
+            note = "不好玩/不感兴趣" if status == "avoided" else ("群聊标记已玩" if status == "played" else "想玩")
+            saved_names: list[str] = []
+            for t in targets:
+                saved = server.log_play(int(t["appid"]), status, note=note, scope=scope_key, name=t.get("name") or "")
+                display = server._fmt_title(saved["name"]) if saved.get("name") else f"AppID `{t['appid']}`"
+                saved_names.append(display)
+            verb = {"played": "已玩过", "avoided": "不感兴趣", "wishlist": "想玩"}[status]
+            if len(saved_names) == 1:
+                confirm = f"📝 已云端记录 **{saved_names[0]}** 为 **{verb}**（以后不再推，发 `撤销` 可撤回）。"
+            else:
+                confirm = f"📝 已云端记录这 {len(saved_names)} 款（{'、'.join(saved_names[:4])}）为 **{verb}**。"
+
+            last_q = self.last_query.get(channel_id)
+            should_reroll = bool(last_q) and (intent.get("wants_reroll") or status == "avoided")
+            if should_reroll and last_q:
+                skip_ids = set(self.session_shown.get(channel_id, set()))
+                if intent.get("wants_batch_skip"):
+                    for r in recent_recs:
+                        skip_ids.add(int(r["appid"]))
+                    self.session_shown[channel_id] = set(skip_ids)
+                res, shown = self._run_query(
+                    channel_id,
+                    scope_key,
+                    now,
+                    last_q["action"],
+                    last_q["params"],
+                    extra_excluded=skip_ids if skip_ids else None,
+                    reset_session_shown=False,
+                )
+                if res.get("status") == "ok" and shown and res.get("markdown_preview"):
+                    return f"{confirm}\n\n{res['markdown_preview']}"
+                return f"{confirm}\n\n当前条件下暂时没有更多备选了，试试放宽条件或发 `@我 潜力demo`！"
+            return confirm
 
         if intent["action"] == "potential_demos":
             self.pending_channels.pop(channel_id, None)
             self.pending_since.pop(channel_id, None)
             self.last_reply_at[channel_id] = now
             p = intent.get("params") or {}
-            res = server.discover_potential_demos(
-                max_age_days=14,
-                horror=p.get("horror", "any"),
-                players=_coerce_players(p.get("players"), 0) if p.get("players") else None,
-                mode=p.get("mode", "online"),
-                tag=p.get("tag"),
-                limit=6,
+            res, _ = self._run_query(
+                channel_id,
+                scope_key,
+                now,
+                "potential_demos",
+                p,
+                reset_session_shown=True,
             )
             if res.get("status") != "ok" or not res.get("markdown_preview"):
                 return "当前筛选条件下暂无潜力新 Demo，试试直接发送 `@我 潜力demo` 查看全部！"
@@ -398,14 +746,13 @@ class KookBotSession:
             self.pending_since.pop(channel_id, None)
             self.last_reply_at[channel_id] = now
             p = intent["params"]
-            res = server.recommend_coop_games(
-                horror=p.get("horror", "any"),
-                budget=p.get("budget", "any"),
-                players=_coerce_players(p.get("players"), 4),
-                mode=p.get("mode", "online"),
-                tag=p.get("tag"),
-                confirmed=True,
-                limit_per_tier=3,
+            res, _ = self._run_query(
+                channel_id,
+                scope_key,
+                now,
+                "recommend",
+                p,
+                reset_session_shown=True,
             )
             if res.get("status") != "ok" or not res.get("markdown_preview"):
                 return "当前筛选条件下暂无匹配游戏，试试放宽条件（例如：`4人 都行 价格无所谓`）！"
@@ -515,11 +862,21 @@ async def run_kook_ws(token: str, max_runtime_seconds: float = 19800) -> None:
         max_message_age_seconds = int(os.getenv("KOOK_MAX_MESSAGE_AGE_SECONDS", "900"))
         ws_connected = False
 
+        # Pull cloud-persisted play/dislike logs from GitHub bot-state branch on startup
+        try:
+            synced = await asyncio.to_thread(server.sync_cloud_user_log)
+            if synced:
+                print("Synced cloud play/dislike log from GitHub bot-state branch", flush=True)
+        except Exception as exc:
+            print(f"Cloud user log sync warning: {exc}", flush=True)
+
         # Discover text channels and snapshot existing message IDs on startup (without pre-warming pending dialogs)
         text_channels: list[str] = []
+        channel_to_guild: dict[str, str] = {}
         try:
             g_data = await _kook_get_json(http, "/guild/list", attempts=2, deadline=deadline)
             for g in g_data.get("data", {}).get("items", []):
+                gid = str(g.get("id") or "")
                 try:
                     c_data = await _kook_get_json(http, "/channel/list", params={"guild_id": g["id"]}, attempts=2, deadline=deadline)
                 except Exception as exc:
@@ -529,6 +886,8 @@ async def run_kook_ws(token: str, max_runtime_seconds: float = 19800) -> None:
                     if ch.get("type") == 1:
                         cid = str(ch["id"])
                         text_channels.append(cid)
+                        if gid:
+                            channel_to_guild[cid] = gid
                         try:
                             m_data = await _kook_get_json(
                                 http, "/message/list", params={"target_id": cid, "page_size": 20}, attempts=2, deadline=deadline
@@ -550,6 +909,7 @@ async def run_kook_ws(token: str, max_runtime_seconds: float = 19800) -> None:
             is_mentioned: bool,
             is_dm: bool = False,
             created_ms=None,
+            guild_id: str = "",
         ):
             if not msg_id or msg_id in seen_msg_ids:
                 return
@@ -566,8 +926,15 @@ async def run_kook_ws(token: str, max_runtime_seconds: float = 19800) -> None:
                 if age > max_message_age_seconds:
                     print(f"Skip stale msg_id={msg_id} age={age:.0f}s", flush=True)
                     return
+            resolved_guild = str(guild_id or channel_to_guild.get(channel_id) or "")
+            if is_dm:
+                scope_key = f"dm:{author_id}"
+            elif resolved_guild:
+                scope_key = f"guild:{resolved_guild}"
+            else:
+                scope_key = f"channel:{channel_id}"
             try:
-                reply = await asyncio.to_thread(session.handle_message, channel_id, content, is_mentioned)
+                reply = await asyncio.to_thread(session.handle_message, channel_id, content, is_mentioned, scope_key)
             except Exception as exc:
                 print(f"Handle message error msg_id={msg_id} channel={channel_id}: {type(exc).__name__}: {exc}", flush=True)
                 return
@@ -764,6 +1131,7 @@ async def run_kook_ws(token: str, max_runtime_seconds: float = 19800) -> None:
                                         is_mentioned=is_mentioned,
                                         is_dm=is_dm,
                                         created_ms=d.get("msg_timestamp"),
+                                        guild_id=str((d.get("extra") or {}).get("guild_id") or ""),
                                     )
                         finally:
                             ws_connected = False

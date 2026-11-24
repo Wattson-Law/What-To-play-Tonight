@@ -20,7 +20,7 @@ on:
     - cron: "0 * * * *"
 
 permissions:
-  contents: read
+  contents: write
   models: read
 
 concurrency:
@@ -64,6 +64,7 @@ jobs:
         env:
           KOOK_TOKEN: ${{ secrets.KOOK_TOKEN }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
           LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
           LLM_BASE_URL: ${{ secrets.LLM_BASE_URL }}
           LLM_MODEL: ${{ secrets.LLM_MODEL }}
